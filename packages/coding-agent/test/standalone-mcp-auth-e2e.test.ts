@@ -104,7 +104,7 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 			JSON.stringify({
 				disabledServers: ["disabledByName"],
 				mcpServers: {
-					absolute: { type: "stdio", command: process.execPath, args: [fixture] },
+					absolute: { command: process.execPath, args: [fixture] },
 					pathCommand: { type: "stdio", command: path.basename(process.execPath), args: [fixture] },
 					zeroTools: {
 						type: "stdio",
@@ -242,7 +242,7 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 		}
 	});
 
-	const invalidCatalogCases: Array<[string, Record<string, unknown>]> = [
+	const invalidCatalogCases: Array<[string, Record<string, unknown>, Record<string, unknown>?]> = [
 		["missing endpoint", { type: "stdio" }],
 		["unknown transport", { type: "bogus", command: process.execPath }],
 		["conflicting endpoints", { type: "stdio", command: process.execPath, url: "http://127.0.0.1" }],
@@ -255,9 +255,17 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 		["malformed headers", { type: "http", url: "http://127.0.0.1", headers: { Authorization: 1 } }],
 		["malformed auth", { type: "http", url: "http://127.0.0.1", auth: { type: "unknown" } }],
 		["malformed oauth callback", { type: "http", url: "http://127.0.0.1", oauth: { callbackPort: -1 } }],
+		["URL transport without explicit type", { url: "http://127.0.0.1" }],
+		["HTTP arguments", { type: "http", url: "http://127.0.0.1", args: [] }],
+		["HTTP environment", { type: "http", url: "http://127.0.0.1", env: {} }],
+		["stdio headers", { type: "stdio", command: process.execPath, headers: {} }],
+		["unknown server key", { type: "stdio", command: process.execPath, unexpected: true }],
+		["unknown auth key", { type: "http", url: "http://127.0.0.1", auth: { type: "oauth", unexpected: true } }],
+		["unknown oauth key", { type: "http", url: "http://127.0.0.1", oauth: { unexpected: true } }],
+		["unknown root key", { type: "stdio", command: process.execPath }, { unexpected: true }],
 	];
 
-	for (const [caseName, invalidConfig] of invalidCatalogCases) {
+	for (const [caseName, invalidConfig, rootFields] of invalidCatalogCases) {
 		it(`rejects ${caseName} before connecting a healthy catalog peer`, async () => {
 			const cwd = path.join(root, "project");
 			const userConfigPath = path.join(getAgentDir(), "mcp.json");
@@ -273,6 +281,7 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 			await fs.writeFile(
 				userConfigPath,
 				JSON.stringify({
+					...rootFields,
 					mcpServers: {
 						healthy: { type: "http", url: httpServer.url.href },
 						invalid: invalidConfig,
