@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import {
 	Agent,
 	type AgentEvent,
@@ -40,6 +41,7 @@ import {
 import { type AsyncJob, AsyncJobManager, isBackgroundJobSupportEnabled, jobElapsedMs } from "./async";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
+import type { SourceMeta } from "./capability/types";
 import { kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
 	formatModelString,
@@ -98,7 +100,7 @@ import {
 } from "./notifications/config";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
-import { MCPManager } from "./runtime-mcp";
+import { discoverAndLoadMCPTools, MCPManager } from "./runtime-mcp";
 import {
 	collectEnvSecrets,
 	deobfuscateSessionContext,
@@ -308,10 +310,12 @@ export interface CreateAgentSessionOptions {
 	/** File-based slash commands. Default: discovered from commands/ directories */
 	slashCommands?: FileSlashCommand[];
 
-	/** @deprecated MCP runtime discovery is quarantined and ignored. */
+	/** Opt into user-global standalone MCP discovery for an eligible top-level session. */
 	enableMCP?: boolean;
-	/** Existing MCP manager to reuse (skips discovery, propagates to toolSession). */
+	/** Existing top-level MCP manager to reuse. Caller retains lifecycle ownership. */
 	mcpManager?: MCPManager;
+	/** Parent-scoped plugin MCP tools inherited by a real subsession. */
+	inheritedPluginMcpTools?: readonly CustomTool[];
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
@@ -387,6 +391,10 @@ export interface CreateAgentSessionResult {
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
 	/** MCP manager for server lifecycle management (undefined if MCP disabled) */
 	mcpManager?: MCPManager;
+	/** True when the manager owns a frozen user-global standalone catalog. */
+	standaloneMcpFrozen?: boolean;
+	/** Immutable plugin-only partition that may be passed to this session's children. */
+	inheritedPluginMcpTools?: readonly CustomTool[];
 	/** Warning if session was restored with a different model than saved */
 	modelFallbackMessage?: string;
 	/** LSP servers detected for startup; warmup may continue in the background */
@@ -824,6 +832,40 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 		}
 	}
 	return commands;
+}
+
+type StandaloneMcpCatalog = {
+	source: "user" | "plugin";
+	servers: readonly string[];
+	tools: readonly CustomTool[];
+};
+
+function standaloneMcpStartupError(code: "MCP_CONNECTION_FAILED" | "MCP_CATALOG_COLLISION"): Error {
+	return new Error(`${code}: standalone MCP startup failed`);
+}
+
+function validateStandaloneMcpCatalog(
+	occupiedToolNames: Iterable<string>,
+	catalogs: readonly StandaloneMcpCatalog[],
+): void {
+	const serverNames = new Set<string>();
+	const toolNames = new Set(Array.from(occupiedToolNames, name => name.normalize("NFC")));
+
+	for (const catalog of [...catalogs].sort((a, b) => Number(a.source === "plugin") - Number(b.source === "plugin"))) {
+		for (const serverName of [...catalog.servers].map(name => name.normalize("NFC")).sort()) {
+			if (serverNames.has(serverName)) throw standaloneMcpStartupError("MCP_CATALOG_COLLISION");
+			serverNames.add(serverName);
+		}
+
+		for (const tool of [...catalog.tools].sort((a, b) => a.name.localeCompare(b.name))) {
+			const serverName = tool.mcpServerName?.normalize("NFC");
+			const toolName = tool.name.normalize("NFC");
+			if (!serverName || !serverNames.has(serverName) || toolNames.has(toolName)) {
+				throw standaloneMcpStartupError("MCP_CATALOG_COLLISION");
+			}
+			toolNames.add(toolName);
+		}
+	}
 }
 /**
  * Create an AgentSession with the specified options.
@@ -1272,6 +1314,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const isSubSession = taskDepth > 0 || Boolean(options.parentTaskPrefix) || Boolean(options.currentAgentType);
 	const resolvedAgentDisplayName = options.agentDisplayName ?? (isSubSession ? "sub" : "main");
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
+	let startupOwnedMcpManager: MCPManager | undefined;
+	let inheritedPluginMcpToolsSnapshot: readonly CustomTool[] = Object.freeze([
+		...(options.inheritedPluginMcpTools ?? []),
+	]);
+	let ownedMcpCleanupPromise: Promise<void> | undefined;
+	const cleanupOwnedMcpOnce = (): Promise<void> => {
+		if (ownedMcpCleanupPromise) return ownedMcpCleanupPromise;
+		ownedMcpCleanupPromise = (async () => {
+			const manager = startupOwnedMcpManager;
+			startupOwnedMcpManager = undefined;
+			if (!manager) return;
+			if (MCPManager.instance() === manager) MCPManager.setInstance(undefined);
+			await manager.disconnectAll();
+		})();
+		return ownedMcpCleanupPromise;
+	};
 
 	try {
 		const getActiveModelString = (): string | undefined => {
@@ -1301,6 +1359,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			requireYieldTool: options.requireYieldTool,
 			taskDepth: options.taskDepth ?? 0,
 			currentAgentType: options.currentAgentType,
+			getInheritedPluginMcpTools: () => inheritedPluginMcpToolsSnapshot,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
 			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
@@ -1412,15 +1471,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Create built-in tools (already wrapped with meta notice formatting)
 		const builtinTools = await logger.time("createAllTools", createTools, toolSession, options.toolNames);
 
-		// MCP runtime discovery is quarantined for the GJC surface. Keep an
-		// explicitly supplied manager only for legacy in-process callers that own
-		// lifecycle themselves; never discover project/user MCP configs here. The
-		// owned manager for always-on plugin-bundle MCP servers is created further
-		// below, after `customTools` is populated, so its tools can be surfaced as
-		// always-on tools per the plugin product contract.
-		let mcpManager: MCPManager | undefined = options.mcpManager;
+		// Subsessions are isolated before considering a caller-supplied manager.
+		// Top-level supplied managers remain caller-owned and skip all discovery.
+		let mcpManager: MCPManager | undefined = isSubSession ? undefined : options.mcpManager;
 		let ownsMcpManager = false;
+		let frozenMcpServerInstructions: Map<string, string> | undefined;
+		let standaloneMcpFrozen = false;
 		const customTools: CustomTool[] = [];
+		const standaloneAlwaysOnMcpToolNames = new Set<string>();
+		const standaloneAcceptedMcpToolNames = new Set<string>();
 
 		// Add image tools when the active model or configured image providers can generate images.
 		const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
@@ -1490,67 +1549,118 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			logger.warn("Failed to load always-on GJC plugin tools", { error });
 		}
 
-		// Always-on GJC plugin-bundle MCP servers. Top-level sessions own a manager
-		// and connect the validated servers; subagents inherit the parent's manager
-		// via options.mcpManager and never spawn their own (prevents duplicate
-		// processes and leaks). Per the plugin product contract, connected MCP tools
-		// are surfaced as always-on tools rather than gated behind MCP selection.
-		if (!mcpManager && !options.parentTaskPrefix) {
+		// Top-level standalone sessions may opt into the canonical user-global
+		// discovery path. Validated plugin MCP servers share that owned manager.
+		// Subsessions receive neither the manager nor bridged MCP tools.
+		if (!mcpManager && !isSubSession) {
+			const standaloneDiscoveryEnabled = options.enableMCP === true;
 			try {
 				const { configs, quarantine } = await buildPluginMcpConfigs({ cwd });
 				for (const q of quarantine) {
 					logger.warn("Quarantined GJC plugin MCP", { plugin: q.plugin, surface: q.surfaceId, code: q.code });
 				}
-				if (Object.keys(configs).length > 0) {
-					const owned = new MCPManager(cwd);
-					try {
-						const sources = Object.fromEntries(
-							Object.keys(configs).map(name => [
+
+				if (standaloneDiscoveryEnabled) {
+					const loaded = await discoverAndLoadMCPTools(cwd, {
+						enableProjectConfig: false,
+						autoloadOnly: true,
+						providers: ["native"],
+						filterExa: false,
+						sourcePaths: [path.join(agentDir, "mcp.json")],
+						filterBrowser: false,
+						cacheStorage: null,
+						authStorage,
+						onConnecting: undefined,
+					});
+					startupOwnedMcpManager = loaded.manager;
+					if (loaded.errors.length > 0) throw standaloneMcpStartupError("MCP_CONNECTION_FAILED");
+
+					const userTools = loaded.tools.map(entry => entry.tool);
+					const pluginServers = Object.keys(configs);
+					let pluginTools: CustomTool[] = [];
+					let connectedPluginServers: string[] = [];
+					if (pluginServers.length > 0) {
+						const sources: Record<string, SourceMeta> = Object.fromEntries(
+							pluginServers.map(name => [
 								name,
-								{ provider: "gjc-plugins", providerName: "GJC plugin bundle", level: "project" as const },
+								{
+									provider: "gjc-plugins",
+									providerName: "GJC plugin bundle",
+									path: cwd,
+									level: "project" as const,
+								},
 							]),
 						);
-						const result = await owned.connectServers(configs, sources as never);
-						for (const [server, err] of result.errors) {
-							logger.warn("GJC plugin MCP connect failed", { path: `mcp:${server}`, error: err });
-						}
-						if (result.connectedServers.length > 0) {
-							mcpManager = owned;
-							ownsMcpManager = true;
-							customTools.push(...(result.tools as CustomTool[]));
-						} else {
-							await owned.disconnectAll().catch(() => {});
-						}
-					} catch (error) {
-						// Avoid leaking partially-started server processes on failure.
-						await owned.disconnectAll().catch(() => {});
-						throw error;
+						const pluginResult = await loaded.manager.connectServers(configs, sources);
+						if (pluginResult.errors.size > 0) throw standaloneMcpStartupError("MCP_CONNECTION_FAILED");
+						pluginTools = pluginResult.tools;
+						connectedPluginServers = pluginResult.connectedServers;
+					}
+
+					validateStandaloneMcpCatalog(getReservedSubskillToolNames(), [
+						{ source: "user", servers: loaded.connectedServers, tools: userTools },
+						{ source: "plugin", servers: connectedPluginServers, tools: pluginTools },
+					]);
+
+					if (loaded.connectedServers.length > 0 || connectedPluginServers.length > 0) {
+						mcpManager = loaded.manager;
+						ownsMcpManager = true;
+						standaloneMcpFrozen = true;
+						customTools.push(...userTools, ...pluginTools);
+						for (const tool of userTools) standaloneAlwaysOnMcpToolNames.add(tool.name);
+						for (const tool of [...userTools, ...pluginTools]) standaloneAcceptedMcpToolNames.add(tool.name);
+						inheritedPluginMcpToolsSnapshot = Object.freeze([...pluginTools]);
+						frozenMcpServerInstructions = new Map(loaded.manager.getServerInstructions());
+					} else {
+						await cleanupOwnedMcpOnce();
+					}
+				} else if (Object.keys(configs).length > 0) {
+					const owned = new MCPManager(cwd);
+					startupOwnedMcpManager = owned;
+					const sources: Record<string, SourceMeta> = Object.fromEntries(
+						Object.keys(configs).map(name => [
+							name,
+							{
+								provider: "gjc-plugins",
+								providerName: "GJC plugin bundle",
+								path: cwd,
+								level: "project" as const,
+							},
+						]),
+					);
+					const result = await owned.connectServers(configs, sources);
+					if (result.errors.size > 0) {
+						logger.warn("GJC plugin MCP connection incomplete", { code: "MCP_CONNECTION_FAILED" });
+					}
+					if (result.connectedServers.length > 0) {
+						mcpManager = owned;
+						ownsMcpManager = true;
+						customTools.push(...result.tools);
+						inheritedPluginMcpToolsSnapshot = Object.freeze([...result.tools]);
+					} else {
+						await cleanupOwnedMcpOnce();
 					}
 				}
 			} catch (error) {
-				logger.warn("Failed to wire GJC plugin MCP servers", { error });
-			}
-		} else if (options.parentTaskPrefix) {
-			// Subagent: inherit the parent's always-on plugin MCP tools WITHOUT
-			// owning the manager (no connect, no callbacks, no disposal). The
-			// top-level session installed its manager as the process-global
-			// instance; reading getTools() surfaces the same always-on tools so the
-			// product decision holds for subagent sessions too.
-			const inherited = mcpManager ?? MCPManager.instance();
-			if (inherited) {
-				try {
-					const inheritedTools = inherited.getTools();
-					if (inheritedTools.length > 0) customTools.push(...(inheritedTools as CustomTool[]));
-				} catch (error) {
-					logger.warn("Failed to inherit plugin MCP tools in subagent", { error });
+				await cleanupOwnedMcpOnce().catch(() => undefined);
+				if (standaloneDiscoveryEnabled) {
+					if (
+						error instanceof Error &&
+						(error.message === "MCP_CONNECTION_FAILED: standalone MCP startup failed" ||
+							error.message === "MCP_CATALOG_COLLISION: standalone MCP startup failed")
+					) {
+						throw error;
+					}
+					throw standaloneMcpStartupError("MCP_CONNECTION_FAILED");
 				}
+				logger.warn("Failed to wire GJC plugin MCP servers", { code: "MCP_PLUGIN_STARTUP_FAILED" });
 			}
+		} else if (isSubSession) {
+			// Only the actual parent may pass its immutable plugin-only partition.
+			// Process-global MCP state is never an inheritance authority.
+			customTools.push(...(options.inheritedPluginMcpTools ?? []));
 		}
-		// Only top-level sessions own the global MCPManager. Subagents already
-		// receive the parent's manager via options.mcpManager; reassigning the
-		// singleton to the same value is a no-op. Keep the gate explicit to mirror
-		// the AsyncJobManager ownership rule.
-		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
+		if (mcpManager) MCPManager.setInstance(mcpManager);
 
 		// Custom tool and extension discovery is quarantined from the public GJC utility surface.
 		// Explicit SDK extension factories are still honored; callers use them to
@@ -1749,6 +1859,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const toolContextStore = new ToolContextStore(getSessionContext);
 
 		const registeredTools = extensionRunner?.getAllRegisteredTools() ?? [];
+		if (standaloneMcpFrozen) {
+			const counts = new Map<string, number>();
+			for (const registered of registeredTools) {
+				const name = registered.definition.name;
+				counts.set(name, (counts.get(name) ?? 0) + 1);
+			}
+			for (const name of standaloneAcceptedMcpToolNames) {
+				if (counts.get(name) !== 1) throw standaloneMcpStartupError("MCP_CATALOG_COLLISION");
+			}
+		}
 		let wrappedExtensionTools: Tool[];
 
 		if (extensionRunner) {
@@ -1968,6 +2088,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const defaultServerNames = new Set(settings.get("mcp.discoveryDefaultServers") ?? []);
 			for (const tool of toolRegistry.values()) {
 				if (!isMCPBridgeTool(tool)) continue;
+				if (standaloneAlwaysOnMcpToolNames.has(tool.name)) continue;
 				discoverableMCPToolNames.add(tool.name);
 				if (initialRequestedActiveToolNames.includes(tool.name)) {
 					explicitlyRequestedMCPToolNames.push(tool.name);
@@ -2001,6 +2122,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const alwaysInclude: string[] = [
 			...(options.customTools?.map(t => (isCustomTool(t) ? t.name : t.name)) ?? []),
 			...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
+			...standaloneAlwaysOnMcpToolNames,
 		];
 		for (const name of alwaysInclude) {
 			if (mcpDiscoveryEnabled && discoverableMCPToolNames.has(name)) {
@@ -2295,9 +2417,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// AsyncJobManager on teardown; subagents inherit the parent's and
 			// **MUST NOT** tear it down.
 			ownedAsyncJobManager: asyncJobManager,
-			// Only the owned plugin-bundle MCP manager is torn down on dispose;
-			// subagents/callers that merely observe the global must not (see
-			// AgentSession.dispose).
+			// Only a top-level SDK-created MCP manager is torn down on dispose;
+			// subsessions and callers with supplied managers do not transfer ownership.
 			ownedMcpManager: ownsMcpManager ? mcpManager : undefined,
 			scopedModels: options.scopedModels,
 			promptTemplates,
@@ -2322,7 +2443,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			discoverableToolAllowedNames: options.discoverableToolAllowedNames,
 			getMcpServerInstructions: mcpManager
 				? () => {
-						const raw = mcpManager.getServerInstructions();
+						const raw = frozenMcpServerInstructions ?? mcpManager.getServerInstructions();
 						if (!raw || raw.size === 0) return raw;
 						const out = new Map<string, string>();
 						for (const [name, text] of raw) {
@@ -2349,6 +2470,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			providerSessionState: options.providerSessionState,
 		});
 		hasSession = true;
+		if (ownsMcpManager) startupOwnedMcpManager = undefined;
 		if (asyncJobManager) {
 			session.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => asyncJobManager.isDeliverySuppressed(entry.jobId),
@@ -2365,13 +2487,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		agentRegistry.attachSession(resolvedAgentId, session, sessionManager.getSessionFile() ?? null);
 		{
 			const originalDispose = session.dispose.bind(session);
-			session.dispose = async () => {
-				try {
-					await originalDispose();
-				} finally {
-					agentRegistry.unregister(resolvedAgentId);
-					unsubscribeCredentialDisabled?.();
-				}
+			let disposePromise: Promise<void> | undefined;
+			session.dispose = () => {
+				disposePromise ??= (async () => {
+					try {
+						await originalDispose();
+					} finally {
+						agentRegistry.unregister(resolvedAgentId);
+						unsubscribeCredentialDisabled?.();
+					}
+				})();
+				return disposePromise;
 			};
 		}
 
@@ -2461,23 +2587,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			),
 		);
 
-		// Wire MCP manager callbacks to session for reactive tool updates.
-		// Skip when reusing a parent's manager — the parent owns the callbacks.
-		if (mcpManager && !options.mcpManager) {
-			// The owned plugin-bundle manager surfaces its tools as always-on custom
-			// tools (registered above), so it must NOT drive refreshMCPTools — that
-			// path strips MCP bridge tools and re-gates them behind MCP selection,
-			// which would deactivate the always-on plugin tools. Reactive tool
-			// updates remain wired only for externally supplied managers.
-			// The owned manager is disconnected by AgentSession.dispose via
-			// ownedMcpManager; only externally supplied managers wire reactive
-			// refreshMCPTools (the owned always-on path must not, or it would
-			// deactivate the plugin tools).
-			if (!ownsMcpManager) {
-				mcpManager.setOnToolsChanged(tools => {
-					void session.refreshMCPTools(tools);
-				});
-			}
+		// Owned catalogs are frozen at startup: never install a live tool-list
+		// refresh callback. Caller-supplied managers remain caller-owned.
+		if (mcpManager && ownsMcpManager) {
 			// Wire prompt refresh → rebuild MCP prompt slash commands
 			mcpManager.setOnPromptsChanged(serverName => {
 				const promptCommands = buildMCPPromptCommands(mcpManager);
@@ -2491,7 +2603,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			};
 			postmortem.register("mcp-notification-cleanup", clearDebounceTimers);
 			mcpManager.setOnResourcesChanged((serverName, uri) => {
-				logger.debug("MCP resources changed", { path: `mcp:${serverName}`, uri });
+				logger.debug("MCP resources changed", {
+					path: `mcp:${serverName}`,
+					code: "MCP_RESOURCES_CHANGED",
+				});
 				if (!settings.get("mcp.notifications")) return;
 				const debounceMs = settings.get("mcp.notificationDebounceMs");
 				const key = `${serverName}:${uri}`;
@@ -2514,6 +2629,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			extensionsResult,
 			setToolUIContext,
 			mcpManager,
+			standaloneMcpFrozen,
+			inheritedPluginMcpTools: inheritedPluginMcpToolsSnapshot,
 			modelFallbackMessage,
 			lspServers,
 			eventBus,
@@ -2527,13 +2644,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (hasSession) {
 				await session.dispose();
 			} else {
+				await cleanupOwnedMcpOnce().catch(() => {
+					logger.warn("Failed to clean up standalone MCP after startup error", { code: "MCP_CLEANUP_FAILED" });
+				});
 				if (hasRegistered) agentRegistry.unregister(resolvedAgentId);
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
 				await disposeVmContextsByOwner(evalKernelOwnerId);
 			}
-		} catch (cleanupError) {
+		} catch {
 			logger.warn("Failed to clean up createAgentSession resources after startup error", {
-				error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+				code: "SESSION_CLEANUP_FAILED",
 			});
 		}
 		throw error;

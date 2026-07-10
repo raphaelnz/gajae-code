@@ -41,7 +41,7 @@ When the Aside CLI is installed and the operator wants to record the Aside MCP c
 gjc mcp add aside aside mcp --project
 ```
 
-Use `--project` for repo-local evaluation records. Omit it only when the operator intentionally wants the stored definition in the user-level GJC MCP config; normal standalone GJC sessions do not consume either scope as runtime tools today.
+Use `--project` for repo-local evaluation records. Omit it only when the operator intentionally wants the definition in the user-level GJC MCP config, where an enabled registration with `autoload` not set to `false` is eligible to load in newly started normal standalone text/default/print sessions. Project records remain storage-only.
 
 After registration, inspect the redacted definition:
 
@@ -49,7 +49,7 @@ After registration, inspect the redacted definition:
 gjc mcp list --json
 ```
 
-This is storage-only recordkeeping today. `gjc mcp add/list/remove` does not make Aside tools visible in normal `gjc`, `gjc --tmux`, or print-mode sessions. Do not paste task transcripts, browser screenshots, cookies, saved credential state, or private Aside profile paths into issues or PRs. If you need to share evidence, summarize the stored definition shape and any benign externally gathered result.
+Project-scoped registration is storage-only recordkeeping. A user-scoped registration can expose the server's tools in newly started normal `gjc`, `gjc --tmux`, or print-mode sessions when enabled and autoloadable, so use user scope only when that execution is intended. Do not paste task transcripts, browser screenshots, cookies, saved credential state, or private Aside profile paths into issues or PRs. If you need to share evidence, summarize the stored definition shape and any benign externally gathered result.
 
 
 Recommended prompt boundary for evaluation:
@@ -85,7 +85,7 @@ Use this checklist instead of a live login/payment/internal-site scenario:
 1. Register the MCP server definition with `gjc mcp add ... --project`.
 2. Run `gjc mcp list --json` and confirm secrets are redacted.
 3. Confirm the record is project-scoped or user-scoped as intended.
-4. Do not expect the registration to appear as model tools in a normal standalone GJC session today.
+4. For project scope, confirm the registration does not appear as model tools. For user scope, confirm a newly started normal standalone session loads it only when that execution is intentional.
 5. If evaluating Aside behavior separately, run one public, non-personal query through the Aside-owned surface, for example: `Find the Aside public help page that describes MCP support and summarize the documented command names.`
 6. Confirm any shared evidence includes only public page titles/URLs or short snippets.
 7. Confirm no API key, Authorization header, cookie, browser profile path, screenshot, raw task transcript, or private session payload appears in terminal output, logs, issue comments, or PR text.
@@ -103,12 +103,12 @@ gjc mcp remove aside-search --project
 | --- | --- |
 | `aside` command not found | Install the Aside CLI from Aside developer settings, then use the concrete CLI path as the MCP `command` if needed. |
 | MCP server does not appear in `gjc mcp list` | Re-run `gjc mcp list --json`; confirm whether the registration was user-scoped or project-scoped. |
-| Aside tools do not appear in a normal GJC session | Expected today. `gjc mcp` stores redacted definitions for recordkeeping/inspection; normal standalone `gjc`, `gjc --tmux`, and print-mode sessions do not load those registrations as runtime tools. |
+| Aside tools do not appear in a normal GJC session | Project scope is storage-only. For user scope, start a new normal standalone text/default/print session and confirm the entry is enabled and does not set `autoload: false`. |
 | Auth failure | Rotate or re-enter the Aside-side token/API key. Do not paste it into GJC prompts or issue comments. |
 | Endpoint/network failure | Check the URL, proxy, and TLS path outside GJC with a benign health check; do not dump request headers. |
 | Retrieval misses context | Narrow the query to public sources first. Do not add browser history, cookies, screenshots, or account pages unless a separate approved design covers that data flow. |
-| Stored definition points at browser-action tools | Treat the server as browser automation, not search-only. Keep it as recordkeeping only for default GJC workflows unless a separate approved design covers that broader sidecar for runtime use. |
+| Stored definition points at browser-action tools | Treat the server as browser automation, not search-only. Keep it project-scoped for storage-only evaluation unless a separate approved design explicitly accepts runtime browser automation; user-scoped enabled/autoloadable registrations can execute as model tools. |
 
 ## Decision
 
-Docs-only is the smallest safe outcome for issue #1097. Existing GJC MCP registration can store a user-provided Aside MCP server definition for redacted inspection, and Aside already documents `aside mcp`; no GJC adapter glue is required. The future-safe boundary is to keep Aside external and opt-in, document read/search/context-only use, and require a separate design before GJC claims runtime support for browser actions, login, payment, internal-tool, or private browser-session workflows.
+Docs-only is the smallest safe outcome for issue #1097. Existing GJC MCP registration can store a user-provided Aside MCP server definition for redacted inspection, and Aside already documents `aside mcp`; no GJC adapter glue is required. Project scope remains storage-only; user scope is an explicit runtime choice for newly started normal standalone sessions. The future-safe boundary is to keep Aside external and opt-in, document read/search/context-only use, and require a separate design before GJC claims safe support for browser actions, login, payment, internal-tool, or private browser-session workflows.

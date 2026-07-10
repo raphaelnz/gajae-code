@@ -1,5 +1,5 @@
 /**
- * Explicit MCP server config storage for standalone GJC.
+ * Explicit MCP server configuration for standalone GJC.
  */
 import { Args, Command, Flags } from "@gajae-code/utils/cli";
 import { type MCPAction, type MCPCommandArgs, runMCPCommand } from "../cli/mcp-cli";
@@ -7,7 +7,7 @@ import { type MCPAction, type MCPCommandArgs, runMCPCommand } from "../cli/mcp-c
 const ACTIONS: MCPAction[] = ["add", "list", "remove"];
 
 export default class MCP extends Command {
-	static description = "Store standalone MCP server definitions without loading them at runtime";
+	static description = "Manage user-autoloadable or project storage-only standalone MCP definitions";
 	static delegateHelp = true;
 
 	static examples = [
@@ -81,7 +81,7 @@ export default class MCP extends Command {
 	}
 
 	private printHelp(): void {
-		process.stdout.write(`Store standalone MCP server definitions in GJC config without loading them at runtime
+		process.stdout.write(`Manage standalone MCP server definitions in GJC config
 
 USAGE
   $ gjc mcp [add|list|remove] [NAME] [COMMAND_OR_URL] [ARGS...] [FLAGS]
@@ -111,7 +111,7 @@ EXAMPLES
   $ gjc mcp remove context7
 
 STORAGE/RUNTIME
-  This command stores only the server definition supplied on this invocation. It does not import or inherit Claude Code, Codex, OpenCode, or other live MCP configs. Normal standalone gjc sessions do not load stored MCP registrations today. Public output redacts env, header, auth, and OAuth credential values.
+  This command stores only the server definition supplied on this invocation. It does not import or inherit Claude Code, Codex, OpenCode, or other live MCP configs. Enabled user-scope registrations with autoload not set to false are loaded by newly started normal standalone text/default/print sessions. Project-scope registrations remain storage-only. Public output redacts env, header, auth, and OAuth credential values.
 `);
 	}
 }

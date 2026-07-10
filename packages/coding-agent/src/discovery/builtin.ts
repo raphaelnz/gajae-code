@@ -226,16 +226,18 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		return result;
 	};
 
-	const paths = [
-		...getProjectConfigDirs().flatMap(projectConfigDir => [
-			{ path: path.join(ctx.cwd, projectConfigDir, "mcp.json"), level: "project" as const },
-			{ path: path.join(ctx.cwd, projectConfigDir, ".mcp.json"), level: "project" as const },
-		]),
-		...getUserAgentDirs().flatMap(userAgentDir => [
-			{ path: path.join(ctx.home, userAgentDir, "mcp.json"), level: "user" as const },
-			{ path: path.join(ctx.home, userAgentDir, ".mcp.json"), level: "user" as const },
-		]),
-	];
+	const paths = ctx.sourcePaths
+		? ctx.sourcePaths.map(sourcePath => ({ path: path.resolve(sourcePath), level: "user" as const }))
+		: [
+				...getProjectConfigDirs().flatMap(projectConfigDir => [
+					{ path: path.join(ctx.cwd, projectConfigDir, "mcp.json"), level: "project" as const },
+					{ path: path.join(ctx.cwd, projectConfigDir, ".mcp.json"), level: "project" as const },
+				]),
+				...getUserAgentDirs().flatMap(userAgentDir => [
+					{ path: path.join(ctx.home, userAgentDir, "mcp.json"), level: "user" as const },
+					{ path: path.join(ctx.home, userAgentDir, ".mcp.json"), level: "user" as const },
+				]),
+			];
 
 	const contents = await Promise.allSettled(
 		paths.map(async p => {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,7 +6,10 @@ import { getBundledModel } from "@gajae-code/ai";
 import { Settings } from "@gajae-code/coding-agent/config/settings";
 import { createAgentSession } from "@gajae-code/coding-agent/sdk";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
+import type { SourceMeta } from "../src/capability/types";
 import { installGjcPluginBundle } from "../src/extensibility/gjc-plugins";
+import * as runtimeMcp from "../src/runtime-mcp";
+import { MCPManager } from "../src/runtime-mcp";
 
 const fixturesRoot = path.join(import.meta.dir, "fixtures", "gjc-plugins");
 const mcpBundle = path.join(fixturesRoot, "valid-mcp-bundle");
@@ -127,6 +130,7 @@ describe("always-on plugin-bundle MCP in a live session", () => {
 			enableMCP: false,
 			enableLsp: false,
 			parentTaskPrefix: "0-Sub",
+			inheritedPluginMcpTools: parent.inheritedPluginMcpTools,
 		});
 
 		try {
@@ -144,5 +148,92 @@ describe("always-on plugin-bundle MCP in a live session", () => {
 		// Only disposing the owner tears the manager down.
 		await parent.session.dispose();
 		expect(parentManager?.getConnectedServers()).toEqual([]);
+	}, 30_000);
+	test("combined standalone parent retains user tools while children inherit only plugin tools", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "gjc-mcp-session-combined-"));
+		tempDirs.push(cwd);
+		await installGjcPluginBundle(mcpBundle, { scope: "project", cwd });
+
+		const manager = new MCPManager(cwd);
+		const fixture = path.join(mcpBundle, "mcp", "server.ts");
+		const sources: Record<string, SourceMeta> = {
+			user_global: {
+				provider: "mcp-json",
+				providerName: "MCP Config",
+				path: path.join(cwd, "synthetic-user-mcp.json"),
+				level: "user",
+			},
+		};
+		const userResult = await manager.connectServers(
+			{ user_global: { type: "stdio", command: process.execPath, args: [fixture] } },
+			sources,
+		);
+		expect(userResult.errors.size).toBe(0);
+		const discovery = spyOn(runtimeMcp, "discoverAndLoadMCPTools").mockResolvedValue({
+			manager,
+			tools: userResult.tools.map(tool => ({
+				path: "mcp:user_global",
+				resolvedPath: `mcp:${tool.name}`,
+				tool,
+			})),
+			errors: [],
+			connectedServers: ["user_global"],
+			exaApiKeys: [],
+		});
+
+		let parent: Awaited<ReturnType<typeof createAgentSession>> | undefined;
+		let child: Awaited<ReturnType<typeof createAgentSession>> | undefined;
+		try {
+			parent = await createAgentSession({
+				cwd,
+				agentDir: cwd,
+				sessionManager: SessionManager.inMemory(cwd),
+				settings: Settings.isolated(),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				extensions: [],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: true,
+				enableLsp: false,
+			});
+			const parentTools = parent.session.getAllToolNames();
+			expect(parentTools).toContain("mcp__user_global_lookup");
+			expect(parentTools).toContain("mcp__domain_docs_lookup");
+			expect(
+				parent.mcpManager
+					?.getTools()
+					.map(tool => tool.name)
+					.sort(),
+			).toEqual(["mcp__domain_docs_lookup", "mcp__user_global_lookup"]);
+
+			child = await createAgentSession({
+				cwd,
+				agentDir: cwd,
+				sessionManager: SessionManager.inMemory(cwd),
+				settings: Settings.isolated(),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				extensions: [],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				parentTaskPrefix: "0-CombinedSub",
+				inheritedPluginMcpTools: parent.inheritedPluginMcpTools,
+			});
+			expect(child.session.getAllToolNames()).toContain("mcp__domain_docs_lookup");
+			expect(child.session.getAllToolNames()).not.toContain("mcp__user_global_lookup");
+			expect(child.mcpManager).toBeUndefined();
+		} finally {
+			await child?.session.dispose();
+			await parent?.session.dispose();
+			discovery.mockRestore();
+		}
+		expect(manager.getConnectedServers()).toEqual([]);
 	}, 30_000);
 });

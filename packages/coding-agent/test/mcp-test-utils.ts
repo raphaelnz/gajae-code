@@ -1,3 +1,5 @@
+import * as path from "node:path";
+import { AuthStorage } from "@gajae-code/ai";
 import type { MCPServerCapabilities, MCPServerConnection, MCPTransport } from "../src/runtime-mcp/types";
 
 export function createMockTransport(
@@ -33,4 +35,34 @@ export function createMockConnection(
 		serverInfo: { name: "test", version: "1.0" },
 		capabilities,
 	};
+}
+
+export async function createSyntheticAuthStorage(root: string): Promise<AuthStorage> {
+	return await AuthStorage.create(path.join(root, "synthetic-auth.db"));
+}
+
+export function syntheticZeroToolServerScript(): string {
+	return `
+const readline = require("node:readline");
+const rl = readline.createInterface({ input: process.stdin });
+const send = message => process.stdout.write(JSON.stringify(message) + "\\n");
+rl.on("line", line => {
+	const request = JSON.parse(line);
+	if (request.method === "initialize") {
+		send({
+			jsonrpc: "2.0",
+			id: request.id,
+			result: {
+				protocolVersion: "2024-11-05",
+				capabilities: { tools: {} },
+				serverInfo: { name: "synthetic-zero-tools", version: "1" },
+			},
+		});
+	} else if (request.method === "tools/list") {
+		send({ jsonrpc: "2.0", id: request.id, result: { tools: [] } });
+	} else if (request.id !== undefined) {
+		send({ jsonrpc: "2.0", id: request.id, result: {} });
+	}
+});
+`;
 }

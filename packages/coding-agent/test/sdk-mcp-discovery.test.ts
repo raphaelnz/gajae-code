@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,6 +11,8 @@ import { createAgentSession } from "@gajae-code/coding-agent/sdk";
 import { SessionManager } from "@gajae-code/coding-agent/session/session-manager";
 import { Snowflake } from "@gajae-code/utils";
 import * as z from "zod/v4";
+import * as runtimeMcp from "../src/runtime-mcp";
+import { MCPManager } from "../src/runtime-mcp";
 
 function createMcpCustomTool(name: string, serverName: string, mcpToolName: string): CustomTool {
 	return {
@@ -71,6 +73,8 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 
 	afterEach(() => {
 		authStorage.close();
+		mock.restore();
+		MCPManager.resetForTests();
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -107,6 +111,174 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		expect(mcpManager).toBeUndefined();
 		expect(session.getAllToolNames().filter(name => name.startsWith("mcp__"))).toEqual([]);
 		expect(session.getActiveToolNames().filter(name => name.startsWith("mcp__"))).toEqual([]);
+		await session.dispose();
+	});
+
+	it("loads top-level MCP with pinned user-only options and preserves the bridged tool object", async () => {
+		const manager = new MCPManager(tempDir);
+		const disconnect = spyOn(manager, "disconnectAll");
+		const tool = createMcpCustomTool("mcp__global_lookup", "global", "lookup");
+		const execute = spyOn(tool, "execute");
+		const discovery = spyOn(runtimeMcp, "discoverAndLoadMCPTools").mockResolvedValue({
+			manager,
+			tools: [{ path: "mcp:global", resolvedPath: "mcp:mcp__global_lookup", tool }],
+			errors: [],
+			connectedServers: ["global"],
+			exaApiKeys: [],
+		});
+
+		const { session, mcpManager } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({}),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: true,
+			enableLsp: false,
+			toolNames: ["read"],
+		});
+
+		expect(discovery).toHaveBeenCalledWith(tempDir, {
+			enableProjectConfig: false,
+			autoloadOnly: true,
+			providers: ["native"],
+			sourcePaths: [path.join(tempDir, "mcp.json")],
+			filterExa: false,
+			filterBrowser: false,
+			cacheStorage: null,
+			authStorage,
+			onConnecting: undefined,
+		});
+		expect(mcpManager).toBe(manager);
+		const bridgedTool = session.agent.state.tools.find(candidate => candidate.name === tool.name);
+		expect(bridgedTool).toBeDefined();
+		await bridgedTool?.execute("call-1", { query: "identity" });
+		expect(execute).toHaveBeenCalledTimes(1);
+		await session.dispose();
+		await session.dispose();
+		expect(disconnect).toHaveBeenCalledTimes(1);
+		discovery.mockRestore();
+	});
+
+	it("does not discover or inherit an MCP manager in a subsession", async () => {
+		const supplied = new MCPManager(tempDir);
+		const disconnect = spyOn(supplied, "disconnectAll");
+		const discovery = spyOn(runtimeMcp, "discoverAndLoadMCPTools");
+
+		const { session, mcpManager } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({}),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: true,
+			mcpManager: supplied,
+			parentTaskPrefix: "1-child",
+			enableLsp: false,
+			toolNames: ["read"],
+		});
+
+		expect(discovery).not.toHaveBeenCalled();
+		expect(mcpManager).toBeUndefined();
+		expect(session.getAllToolNames().filter(name => name.startsWith("mcp__"))).toEqual([]);
+		await session.dispose();
+		expect(disconnect).not.toHaveBeenCalled();
+		discovery.mockRestore();
+	});
+
+	it("disconnects an owned manager exactly once when standalone discovery is incomplete", async () => {
+		const canary = "authorization=secret-startup-canary";
+		const manager = new MCPManager(tempDir);
+		const disconnect = spyOn(manager, "disconnectAll");
+		const discovery = spyOn(runtimeMcp, "discoverAndLoadMCPTools").mockResolvedValue({
+			manager,
+			tools: [
+				{
+					path: "mcp:healthy",
+					resolvedPath: "mcp:mcp__healthy_lookup",
+					tool: createMcpCustomTool("mcp__healthy_lookup", "healthy", "lookup"),
+				},
+			],
+			errors: [{ path: "mcp:redacted", error: canary }],
+			connectedServers: ["healthy"],
+			exaApiKeys: [],
+		});
+
+		let surfaced = "";
+		try {
+			await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({}),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: true,
+				enableLsp: false,
+				toolNames: ["read"],
+			});
+		} catch (error) {
+			surfaced = String(error);
+		}
+		expect(surfaced).toContain("MCP_CONNECTION_FAILED");
+		expect(surfaced).not.toContain(canary);
+		expect(disconnect).toHaveBeenCalledTimes(1);
+		discovery.mockRestore();
+	});
+
+	it("rejects a whole standalone catalog on a duplicate tool name and cleans up once", async () => {
+		const manager = new MCPManager(tempDir);
+		const disconnect = spyOn(manager, "disconnectAll");
+		const first = createMcpCustomTool("mcp__duplicate", "alpha", "first");
+		const second = createMcpCustomTool("mcp__duplicate", "beta", "second");
+		const discovery = spyOn(runtimeMcp, "discoverAndLoadMCPTools").mockResolvedValue({
+			manager,
+			tools: [
+				{ path: "mcp:alpha", resolvedPath: "mcp:mcp__duplicate", tool: first },
+				{ path: "mcp:beta", resolvedPath: "mcp:mcp__duplicate", tool: second },
+			],
+			errors: [],
+			connectedServers: ["alpha", "beta"],
+			exaApiKeys: [],
+		});
+
+		await expect(
+			createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({}),
+				model: getBundledModel("openai", "gpt-4o-mini"),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: true,
+				enableLsp: false,
+				toolNames: ["read"],
+			}),
+		).rejects.toThrow("MCP_CATALOG_COLLISION");
+		expect(disconnect).toHaveBeenCalledTimes(1);
+		discovery.mockRestore();
 	});
 
 	it("does not advertise MCP discovery when search_tool_bm25 is not active", async () => {

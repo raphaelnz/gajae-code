@@ -4,11 +4,12 @@
  * Uses the capability system to load MCP servers from multiple sources.
  */
 
+import * as path from "node:path";
 import { getMCPConfigPath } from "@gajae-code/utils";
 import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
-import { loadCapability } from "../discovery";
+import { invalidate as invalidateCapabilityPath, loadCapability } from "../discovery";
 import { readDisabledServers } from "./config-writer";
 import type { MCPServerConfig } from "./types";
 
@@ -22,6 +23,12 @@ export interface LoadMCPConfigsOptions {
 	filterBrowser?: boolean;
 	/** Only include servers eligible for startup connection, i.e. autoload !== false (default: false) */
 	autoloadOnly?: boolean;
+	/** Restrict capability providers (for standalone GJC use "native" only). */
+	providers?: string[];
+	/** Override the capability home for isolated probes. */
+	home?: string;
+	/** Restrict configs to exact source files after capability discovery. */
+	sourcePaths?: readonly string[];
 }
 
 /** Result of loading MCP configs */
@@ -101,17 +108,30 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;
 	const autoloadOnly = options?.autoloadOnly ?? false;
+	for (const sourcePath of options?.sourcePaths ?? []) invalidateCapabilityPath(sourcePath);
 
 	// Load MCP servers via capability system
-	const result = await loadCapability<MCPServer>(mcpCapability.id, { cwd });
+	const result = await loadCapability<MCPServer>(mcpCapability.id, {
+		cwd,
+		providers: options?.providers,
+		home: options?.home,
+		sourcePaths: options?.sourcePaths,
+	});
 
-	// Filter out project-level configs if disabled
-	const servers = enableProjectConfig
-		? result.items
-		: result.items.filter(server => server._source.level !== "project");
+	// Apply scope and exact-source restrictions before any config is eligible.
+	const allowedSourcePaths = options?.sourcePaths
+		? new Set(options.sourcePaths.map(sourcePath => path.resolve(sourcePath)))
+		: undefined;
+	const servers = result.items.filter(server => {
+		if (!enableProjectConfig && server._source.level === "project") return false;
+		if (allowedSourcePaths && !allowedSourcePaths.has(path.resolve(server._source.path))) return false;
+		return true;
+	});
 
 	// Load user-level disabled servers list
-	const disabledServers = new Set(await readDisabledServers(getMCPConfigPath("user", cwd)));
+	const disabledServers = new Set(
+		await readDisabledServers(options?.sourcePaths?.[0] ?? getMCPConfigPath("user", cwd)),
+	);
 	// Convert to legacy format and preserve source metadata
 	let configs: Record<string, MCPServerConfig> = {};
 	let sources: Record<string, SourceMeta> = {};

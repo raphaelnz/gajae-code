@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { logger } from "@gajae-code/utils";
 import { disposeAllOwnedProcesses, liveOwnedProcessCount } from "../../src/runtime/process-lifecycle";
 import { HttpTransport } from "../../src/runtime-mcp/transports/http";
 import { StdioTransport } from "../../src/runtime-mcp/transports/stdio";
@@ -131,5 +132,38 @@ describe("MCP HTTP transport lifecycle", () => {
 		await transport.startSSEListener();
 
 		await transport.close();
+	});
+
+	test("SSE stream diagnostics omit URLs and remote error payloads", async () => {
+		const canary = "authorization=secret-sse-canary";
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		const server = Bun.serve({
+			port: 0,
+			idleTimeout: 255,
+			fetch() {
+				const stream = new ReadableStream({
+					start(controller) {
+						controller.enqueue(new TextEncoder().encode(`data: {"${canary}":\n\n`));
+						controller.close();
+					},
+				});
+				return new Response(stream, { headers: { "Content-Type": "text/event-stream" } });
+			},
+		});
+		servers.push(server);
+		const transport = new HttpTransport({
+			type: "http",
+			url: `${server.url.href}?token=${canary}`,
+			timeout: 1_000,
+		});
+		await transport.connect();
+		await transport.startSSEListener();
+		await waitFor(() => debug.mock.calls.some(call => JSON.stringify(call).includes("MCP_HTTP_SSE_STREAM_FAILED")));
+
+		const rendered = JSON.stringify(debug.mock.calls);
+		expect(rendered).not.toContain(canary);
+		expect(rendered).not.toContain("token=");
+		await transport.close();
+		debug.mockRestore();
 	});
 });

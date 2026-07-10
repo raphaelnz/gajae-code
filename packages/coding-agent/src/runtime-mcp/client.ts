@@ -378,7 +378,10 @@ export async function subscribeToResources(
 	);
 	for (const result of results) {
 		if (result.status === "rejected") {
-			logger.warn("Failed to subscribe to MCP resource", { error: result.reason });
+			logger.warn("Failed to subscribe to MCP resource", {
+				path: `mcp:${connection.name}`,
+				code: "MCP_RESOURCE_SUBSCRIBE_FAILED",
+			});
 		}
 	}
 }
@@ -404,7 +407,10 @@ export async function unsubscribeFromResources(
 	);
 	for (const result of results) {
 		if (result.status === "rejected") {
-			logger.warn("Failed to unsubscribe from MCP resource", { error: result.reason });
+			logger.warn("Failed to unsubscribe from MCP resource", {
+				path: `mcp:${connection.name}`,
+				code: "MCP_RESOURCE_UNSUBSCRIBE_FAILED",
+			});
 		}
 	}
 }

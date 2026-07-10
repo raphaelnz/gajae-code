@@ -1004,6 +1004,7 @@ export async function runRootCommand(
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
+	sessionOptions.enableMCP = mode === "text";
 	sessionOptions.settings = settingsInstance;
 	const hasRootStartupProfile = Boolean(settingsInstance.get("modelProfile.default") || parsedArgs.mpreset);
 
@@ -1061,10 +1062,8 @@ export async function runRootCommand(
 		});
 		await (deps.runAcpMode ?? (await import("./modes/acp")).runAcpMode)(createAcpSession);
 	} else {
-		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager, eventBus } = await createSession(
-			sessionOptions,
-			{ skipPostCreateModelRefresh: hasRootStartupProfile },
-		);
+		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager, standaloneMcpFrozen, eventBus } =
+			await createSession(sessionOptions, { skipPostCreateModelRefresh: hasRootStartupProfile });
 		applyCliRuntimeApiKeyOverride(authStorage, parsedArgs.apiKey, session.model);
 
 		// Research-mode (RLM) preset: hard tool-boundary assertion after the registry is assembled.
@@ -1109,6 +1108,7 @@ export async function runRootCommand(
 			process.stderr.write(
 				`${chalk.yellow(`\nAdvanced manual config remains available at ${ModelsConfigFile.path()}`)}\n`,
 			);
+			await session.dispose();
 			process.exit(1);
 		}
 
@@ -1162,7 +1162,7 @@ export async function runRootCommand(
 				parsedArgs.messages,
 				setToolUIContext,
 				lspServers,
-				mcpManager,
+				standaloneMcpFrozen ? undefined : mcpManager,
 				eventBus,
 				initialMessage,
 				initialImages,

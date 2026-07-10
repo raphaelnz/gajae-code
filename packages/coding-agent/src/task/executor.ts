@@ -18,6 +18,7 @@ import { formatModelString, resolveModelOverrideWithAuthFallback } from "../conf
 import type { PromptTemplate } from "../config/prompt-templates";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
+import type { CustomTool } from "../extensibility/custom-tools/types";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import { buildAgentSubskillInjection, renderAgentPromptAdditions } from "../extensibility/gjc-plugins";
@@ -167,6 +168,8 @@ export interface ExecutorOptions {
 	 */
 	parentArtifactManager?: ArtifactManager;
 	parentHindsightSessionState?: HindsightSessionState;
+	/** Parent-scoped immutable plugin MCP partition. */
+	inheritedPluginMcpTools?: readonly CustomTool[];
 	/**
 	 * Parent agent's OpenTelemetry configuration. When defined, the subagent's
 	 * loop is started with the same tracer/hooks but its own agent identity
@@ -1415,6 +1418,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					enableLsp: lspEnabled,
 					skipPythonPreflight,
 					enableMCP,
+					inheritedPluginMcpTools: options.inheritedPluginMcpTools,
 					localProtocolOptions: options.localProtocolOptions,
 					telemetry: subagentTelemetry,
 					forkContextSeed: options.forkContextSeed,

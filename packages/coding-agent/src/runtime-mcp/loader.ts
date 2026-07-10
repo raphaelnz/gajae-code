@@ -36,6 +36,12 @@ export interface MCPToolsLoadOptions {
 	filterBrowser?: boolean;
 	/** Only connect servers with autoload !== false (default: false) */
 	autoloadOnly?: boolean;
+	/** Restrict discovery to named capability providers. */
+	providers?: string[];
+	/** Override capability home for isolated probes. */
+	home?: string;
+	/** Restrict configs to exact source files after capability discovery. */
+	sourcePaths?: readonly string[];
 	/** SQLite storage for MCP tool cache (null disables cache) */
 	cacheStorage?: AgentStorage | null;
 	/** Auth storage used to resolve OAuth credentials before initial MCP connect */
@@ -75,6 +81,9 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 			filterExa: options?.filterExa,
 			filterBrowser: options?.filterBrowser,
 			autoloadOnly: options?.autoloadOnly,
+			providers: options?.providers,
+			home: options?.home,
+			sourcePaths: options?.sourcePaths,
 		});
 	} catch (error) {
 		// If discovery fails entirely, return empty result

@@ -149,6 +149,12 @@ export interface MCPDiscoverOptions {
 	filterBrowser?: boolean;
 	/** Only connect servers with autoload !== false (default: false) */
 	autoloadOnly?: boolean;
+	/** Restrict discovery to named capability providers. */
+	providers?: string[];
+	/** Override capability home for isolated probes. */
+	home?: string;
+	/** Restrict configs to exact source files after capability discovery. */
+	sourcePaths?: readonly string[];
 	/** Called when starting to connect to servers */
 	onConnecting?: (serverNames: string[]) => void;
 }
@@ -262,10 +268,10 @@ export class MCPManager {
 					notificationEpoch,
 				);
 				if (action === "rollback") {
-					void unsubscribeFromResources(connection, uris).catch(error => {
+					void unsubscribeFromResources(connection, uris).catch(() => {
 						logger.debug("Failed to rollback stale MCP resource subscription", {
 							path: `mcp:${name}`,
-							error,
+							code: "MCP_RESOURCE_ROLLBACK_FAILED",
 						});
 					});
 					return;
@@ -275,8 +281,11 @@ export class MCPManager {
 				}
 				this.#subscribedResources.set(name, new Set(uris));
 			})
-			.catch(error => {
-				logger.debug("Failed to subscribe to MCP resources", { path: `mcp:${name}`, error });
+			.catch(() => {
+				logger.debug("Failed to subscribe to MCP resources", {
+					path: `mcp:${name}`,
+					code: "MCP_RESOURCE_SUBSCRIBE_FAILED",
+				});
 			});
 	}
 
@@ -303,8 +312,11 @@ export class MCPManager {
 		for (const [name, connection] of this.#connections) {
 			const uris = this.#subscribedResources.get(name);
 			if (uris && uris.size > 0) {
-				void unsubscribeFromResources(connection, Array.from(uris)).catch(error => {
-					logger.debug("Failed to unsubscribe MCP resources", { path: `mcp:${name}`, error });
+				void unsubscribeFromResources(connection, Array.from(uris)).catch(() => {
+					logger.debug("Failed to unsubscribe MCP resources", {
+						path: `mcp:${name}`,
+						code: "MCP_RESOURCE_UNSUBSCRIBE_FAILED",
+					});
 				});
 			}
 		}
@@ -328,6 +340,9 @@ export class MCPManager {
 			filterExa: options?.filterExa,
 			filterBrowser: options?.filterBrowser,
 			autoloadOnly: options?.autoloadOnly,
+			providers: options?.providers,
+			home: options?.home,
+			sourcePaths: options?.sourcePaths,
 		});
 		const result = await this.connectServers(configs, sources, options?.onConnecting);
 		result.exaApiKeys = exaApiKeys;
@@ -511,12 +526,14 @@ export class MCPManager {
 					void this.toolCache?.set(name, config, serverTools);
 					await this.#loadServerResourcesAndPrompts(name, connection);
 				})
-				.catch(error => {
+				.catch(() => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
 					if (!allowBackgroundLogging || reportedErrors.has(name)) return;
-					const message = error instanceof Error ? error.message : String(error);
-					logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
+					logger.error("MCP tool load failed", {
+						path: `mcp:${name}`,
+						code: "MCP_TOOL_LOAD_FAILED",
+					});
 				});
 		}
 
@@ -603,11 +620,15 @@ export class MCPManager {
 		}
 
 		// Stable sort by name so the order is independent of connection completion.
-		// See `sortMCPToolsByName` for the cache-stability rationale.
+		// Incremental connectServers() calls return only tools from this call while
+		// preserving tools already accepted from other connected servers.
 		sortMCPToolsByName(allTools);
-
-		// Update cached tools
-		if (shouldPublishToolSnapshot) this.#tools = allTools;
+		if (shouldPublishToolSnapshot) {
+			const replacedServers = new Set(allTools.map(tool => tool.mcpServerName).filter(Boolean));
+			const retainedTools = this.#tools.filter(tool => !replacedServers.has(tool.mcpServerName));
+			this.#tools = [...retainedTools, ...allTools];
+			sortMCPToolsByName(this.#tools);
+		}
 		allowBackgroundLogging = true;
 
 		return {
@@ -637,8 +658,12 @@ export class MCPManager {
 					return this.refreshServerPrompts(serverName);
 			}
 		})();
-		void refresh.catch(error => {
-			logger.debug("Failed MCP notification refresh", { path: `mcp:${serverName}`, kind, error });
+		void refresh.catch(() => {
+			logger.debug("Failed MCP notification refresh", {
+				path: `mcp:${serverName}`,
+				kind,
+				code: "MCP_NOTIFICATION_REFRESH_FAILED",
+			});
 		});
 	}
 	#handleServerNotification(serverName: string, method: string, params: unknown): void {
@@ -904,7 +929,7 @@ export class MCPManager {
 					const connection = await this.#connectAndWireServer(name, config, source, this.#epoch, reconnectEpoch);
 					logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
 					return connection;
-				} catch (error) {
+				} catch {
 					if ((this.#disconnectEpochs.get(name) ?? 0) !== reconnectEpoch || backoffAbort.signal.aborted) {
 						logger.debug("MCP reconnect aborted after server disconnected", {
 							path: `mcp:${name}`,
@@ -914,16 +939,18 @@ export class MCPManager {
 						return null;
 					}
 
-					const msg = error instanceof Error ? error.message : String(error);
 					if (attempt < delays.length) {
 						logger.debug("MCP reconnect attempt failed, retrying", {
 							path: `mcp:${name}`,
 							attempt: attempt + 1,
-							error: msg,
+							code: "MCP_RECONNECT_RETRY",
 						});
 						await delay(delays[attempt], backoffAbort.signal).catch(() => undefined);
 					} else {
-						logger.error("MCP reconnect failed after retries", { path: `mcp:${name}`, error: msg });
+						logger.error("MCP reconnect failed after retries", {
+							path: `mcp:${name}`,
+							code: "MCP_RECONNECT_FAILED",
+						});
 						// Don't remove stale tools — keep them in the registry so they
 						// remain selected. Calls will fail with MCP errors, which
 						// triggers the tool-level reconnect, or the user can run
@@ -1034,8 +1061,11 @@ export class MCPManager {
 					const notificationEpoch = this.#notificationsEpoch;
 					this.#subscribeAndTrack(name, connection, uris, notificationEpoch);
 				}
-			} catch (error) {
-				logger.debug("Failed to load MCP resources", { path: `mcp:${name}`, error });
+			} catch {
+				logger.debug("Failed to load MCP resources", {
+					path: `mcp:${name}`,
+					code: "MCP_RESOURCE_LOAD_FAILED",
+				});
 			}
 		}
 
@@ -1043,8 +1073,11 @@ export class MCPManager {
 			try {
 				await listPrompts(connection);
 				this.#onPromptsChanged?.(name);
-			} catch (error) {
-				logger.debug("Failed to load MCP prompts", { path: `mcp:${name}`, error });
+			} catch {
+				logger.debug("Failed to load MCP prompts", {
+					path: `mcp:${name}`,
+					code: "MCP_PROMPT_LOAD_FAILED",
+				});
 			}
 		}
 	}
@@ -1109,8 +1142,11 @@ export class MCPManager {
 					if (removed.length > 0) {
 						try {
 							await unsubscribeFromResources(connection, removed);
-						} catch (error) {
-							logger.debug("Failed to unsubscribe stale MCP resources", { path: `mcp:${name}`, error });
+						} catch {
+							logger.debug("Failed to unsubscribe stale MCP resources", {
+								path: `mcp:${name}`,
+								code: "MCP_RESOURCE_UNSUBSCRIBE_STALE_FAILED",
+							});
 						}
 					}
 				}
@@ -1125,8 +1161,11 @@ export class MCPManager {
 						notificationEpoch,
 					);
 					if (action === "rollback") {
-						await unsubscribeFromResources(connection, allUris).catch(error => {
-							logger.debug("Failed to rollback stale MCP resource subscription", { path: `mcp:${name}`, error });
+						await unsubscribeFromResources(connection, allUris).catch(() => {
+							logger.debug("Failed to rollback stale MCP resource subscription", {
+								path: `mcp:${name}`,
+								code: "MCP_RESOURCE_ROLLBACK_FAILED",
+							});
 						});
 						return;
 					}
@@ -1134,8 +1173,11 @@ export class MCPManager {
 						return;
 					}
 					this.#subscribedResources.set(name, newUris);
-				} catch (error) {
-					logger.debug("Failed to re-subscribe to MCP resources", { path: `mcp:${name}`, error });
+				} catch {
+					logger.debug("Failed to re-subscribe to MCP resources", {
+						path: `mcp:${name}`,
+						code: "MCP_RESOURCE_RESUBSCRIBE_FAILED",
+					});
 				}
 			}
 		};
@@ -1262,10 +1304,9 @@ export class MCPManager {
 							const refreshedCredential = { type: "oauth" as const, ...refreshed };
 							await this.#authStorage.set(credentialId, refreshedCredential);
 							credential = refreshedCredential;
-						} catch (refreshError) {
+						} catch {
 							logger.warn("MCP OAuth refresh failed, using existing token", {
-								credentialId,
-								error: refreshError,
+								code: "MCP_OAUTH_REFRESH_FAILED",
 							});
 						}
 					}
@@ -1288,8 +1329,10 @@ export class MCPManager {
 						};
 					}
 				}
-			} catch (error) {
-				logger.warn("Failed to resolve OAuth credential", { credentialId, error });
+			} catch {
+				logger.warn("Failed to resolve OAuth credential", {
+					code: "MCP_OAUTH_RESOLVE_FAILED",
+				});
 			}
 		}
 

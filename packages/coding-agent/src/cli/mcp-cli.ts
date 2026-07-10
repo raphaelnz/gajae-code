@@ -5,7 +5,7 @@
  * own MCP config. It never imports or inherits live configs from other agents.
  */
 import { getMCPConfigPath, getProjectDir } from "@gajae-code/utils";
-import { getMCPServer, readMCPConfigFile, removeMCPServer, upsertMCPServer } from "../runtime-mcp/config-writer";
+import { readMCPConfigFile, removeMCPServer, upsertMCPServer } from "../runtime-mcp/config-writer";
 import type { MCPConfigFile, MCPServerConfig } from "../runtime-mcp/types";
 
 export type MCPAction = "add" | "list" | "remove";
@@ -38,8 +38,8 @@ interface ScopedPath {
 }
 
 interface RuntimeDisclosure {
-	runtimeStatus: "storage-only";
-	runtimeLoadedByStandalone: false;
+	runtimeStatus: "autoload-eligible" | "autoload-disabled" | "storage-only";
+	runtimeLoadedByStandalone: boolean;
 	runtimeNote: string;
 }
 
@@ -53,10 +53,23 @@ interface RuntimeRedactedServerEntry extends RedactedServerEntry, RuntimeDisclos
 const REDACTED = "<redacted>";
 const SENSITIVE_KEY_PATTERN =
 	/(?:token|secret|key|credential|password|passwd|pwd|authorization|auth|bearer|cookie|session)/i;
-const STORAGE_ONLY_RUNTIME_DISCLOSURE: RuntimeDisclosure = {
+const PROJECT_RUNTIME_DISCLOSURE: RuntimeDisclosure = {
 	runtimeStatus: "storage-only",
 	runtimeLoadedByStandalone: false,
-	runtimeNote: "Stored MCP registrations are not loaded by normal standalone gjc sessions today.",
+	runtimeNote: "Project MCP registrations remain storage-only and are not loaded by normal standalone gjc sessions.",
+};
+
+const USER_RUNTIME_DISCLOSURE: RuntimeDisclosure = {
+	runtimeStatus: "autoload-eligible",
+	runtimeLoadedByStandalone: true,
+	runtimeNote:
+		"Enabled user MCP registrations with autoload not set to false are loaded by newly started normal standalone text/default/print sessions.",
+};
+
+const USER_AUTOLOAD_DISABLED_DISCLOSURE: RuntimeDisclosure = {
+	runtimeStatus: "autoload-disabled",
+	runtimeLoadedByStandalone: false,
+	runtimeNote: "This user MCP registration is not autoloaded because it is disabled or sets autoload to false.",
 };
 
 function resolvePath(args: MCPCommandArgs): ScopedPath {
@@ -224,14 +237,43 @@ export function redactMCPServerConfig(config: MCPServerConfig): MCPServerConfig 
 	return redacted;
 }
 
-function withRuntimeDisclosure<T extends object>(value: T): T & RuntimeDisclosure {
-	return { ...value, ...STORAGE_ONLY_RUNTIME_DISCLOSURE };
+function runtimeDisclosure(
+	scope: ScopedPath["scope"],
+	config?: MCPServerConfig,
+	disabledByName = false,
+): RuntimeDisclosure {
+	if (scope === "project") return PROJECT_RUNTIME_DISCLOSURE;
+	if (disabledByName || config?.enabled === false || config?.autoload === false)
+		return USER_AUTOLOAD_DISABLED_DISCLOSURE;
+	return USER_RUNTIME_DISCLOSURE;
 }
 
-function collectEntries(config: MCPConfigFile): RuntimeRedactedServerEntry[] {
+function withRuntimeDisclosure<T extends object>(
+	value: T,
+	scope: ScopedPath["scope"],
+	config?: MCPServerConfig,
+	disabledByName = false,
+): T & RuntimeDisclosure {
+	return { ...value, ...runtimeDisclosure(scope, config, disabledByName) };
+}
+
+function runtimeStatusLine(scope: ScopedPath["scope"], config?: MCPServerConfig, disabledByName = false): string {
+	const disclosure = runtimeDisclosure(scope, config, disabledByName);
+	return `Status: ${disclosure.runtimeStatus}; ${disclosure.runtimeNote}`;
+}
+
+function collectEntries(config: MCPConfigFile, scope: ScopedPath["scope"]): RuntimeRedactedServerEntry[] {
+	const disabledServers = new Set(config.disabledServers ?? []);
 	return Object.entries(config.mcpServers ?? {})
 		.sort(([a], [b]) => a.localeCompare(b))
-		.map(([name, serverConfig]) => withRuntimeDisclosure({ name, config: redactMCPServerConfig(serverConfig) }));
+		.map(([name, serverConfig]) =>
+			withRuntimeDisclosure(
+				{ name, config: redactMCPServerConfig(serverConfig) },
+				scope,
+				serverConfig,
+				disabledServers.has(name),
+			),
+		);
 }
 
 function writeJson(value: unknown): void {
@@ -253,50 +295,60 @@ function renderDetails(entry: RedactedServerEntry): string {
 
 async function runAdd(args: MCPCommandArgs, scoped: ScopedPath): Promise<void> {
 	if (!args.name) throw new MCPArgsError("`gjc mcp add` requires a server name.");
-	const config = buildServerConfig(args);
-	const result = await upsertMCPServer(scoped.path, args.name, config, { force: args.flags.force });
+	const requestedConfig = buildServerConfig(args);
+	const result = await upsertMCPServer(scoped.path, args.name, requestedConfig, { force: args.flags.force });
+	const storedFile = await readMCPConfigFile(scoped.path);
+	const config = storedFile.mcpServers?.[args.name] ?? requestedConfig;
+	const disabledByName = new Set(storedFile.disabledServers ?? []).has(args.name);
 	const redacted = redactMCPServerConfig(config);
 	if (args.flags.json) {
 		writeJson(
-			withRuntimeDisclosure({
-				action: "add",
-				status: result.status,
-				name: args.name,
-				scope: scoped.scope,
-				path: scoped.path,
-				config: redacted,
-			}),
+			withRuntimeDisclosure(
+				{
+					action: "add",
+					status: result.status,
+					name: args.name,
+					scope: scoped.scope,
+					path: scoped.path,
+					config: redacted,
+				},
+				scoped.scope,
+				config,
+				disabledByName,
+			),
 		);
 		return;
 	}
 	if (result.status === "skipped") {
 		process.stdout.write(
-			`MCP server "${args.name}" already exists in ${scoped.scope} config. Pass --force to overwrite. ` +
-				"Status: storage-only; normal standalone gjc sessions do not load stored MCP registrations today.\n",
+			`MCP server "${args.name}" already exists in ${scoped.scope} config. Pass --force to overwrite. ${runtimeStatusLine(scoped.scope, config, disabledByName)}\n`,
 		);
 		return;
 	}
 	process.stdout.write(
-		`MCP server "${args.name}" ${result.status} in ${scoped.scope} config: ${scoped.path}\nStatus: storage-only; normal standalone gjc sessions do not load stored MCP registrations today.\n`,
+		`MCP server "${args.name}" ${result.status} in ${scoped.scope} config: ${scoped.path}\n${runtimeStatusLine(scoped.scope, config, disabledByName)}\n`,
 	);
 }
 
 async function runList(args: MCPCommandArgs, scoped: ScopedPath): Promise<void> {
 	const config = await readMCPConfigFile(scoped.path);
-	const entries = collectEntries(config);
+	const entries = collectEntries(config, scoped.scope);
 	if (args.flags.json) {
-		writeJson(withRuntimeDisclosure({ action: "list", scope: scoped.scope, path: scoped.path, servers: entries }));
+		writeJson(
+			withRuntimeDisclosure(
+				{ action: "list", scope: scoped.scope, path: scoped.path, servers: entries },
+				scoped.scope,
+			),
+		);
 		return;
 	}
 	if (entries.length === 0) {
 		process.stdout.write(
-			`No MCP servers registered in ${scoped.scope} config: ${scoped.path}\nStatus: storage-only; normal standalone gjc sessions do not load stored MCP registrations today.\n`,
+			`No MCP servers registered in ${scoped.scope} config: ${scoped.path}\n${runtimeStatusLine(scoped.scope)}\n`,
 		);
 		return;
 	}
-	process.stdout.write(
-		`MCP servers in ${scoped.scope} config: ${scoped.path}\nStatus: storage-only; normal standalone gjc sessions do not load stored MCP registrations today.\n`,
-	);
+	process.stdout.write(`MCP servers in ${scoped.scope} config: ${scoped.path}\n${runtimeStatusLine(scoped.scope)}\n`);
 	for (const entry of entries) {
 		process.stdout.write(`${renderDetails(entry)}\n`);
 	}
@@ -304,7 +356,9 @@ async function runList(args: MCPCommandArgs, scoped: ScopedPath): Promise<void> 
 
 async function runRemove(args: MCPCommandArgs, scoped: ScopedPath): Promise<void> {
 	if (!args.name) throw new MCPArgsError("`gjc mcp remove` requires a server name.");
-	const existing = await getMCPServer(scoped.path, args.name);
+	const storedFile = await readMCPConfigFile(scoped.path);
+	const existing = storedFile.mcpServers?.[args.name];
+	const disabledByName = new Set(storedFile.disabledServers ?? []).has(args.name);
 	if (!existing) {
 		throw new MCPArgsError(`MCP server "${args.name}" not found in ${scoped.scope} config.`);
 	}
@@ -312,19 +366,24 @@ async function runRemove(args: MCPCommandArgs, scoped: ScopedPath): Promise<void
 	const entry = { name: args.name, config: redactMCPServerConfig(existing) };
 	if (args.flags.json) {
 		writeJson(
-			withRuntimeDisclosure({
-				action: "remove",
-				status: "removed",
-				name: args.name,
-				scope: scoped.scope,
-				path: scoped.path,
-				removed: entry,
-			}),
+			withRuntimeDisclosure(
+				{
+					action: "remove",
+					status: "removed",
+					name: args.name,
+					scope: scoped.scope,
+					path: scoped.path,
+					removed: entry,
+				},
+				scoped.scope,
+				existing,
+				disabledByName,
+			),
 		);
 		return;
 	}
 	process.stdout.write(
-		`Removed MCP server "${args.name}" from ${scoped.scope} config: ${scoped.path}\nStatus: storage-only; normal standalone gjc sessions do not load stored MCP registrations today.\n`,
+		`Removed MCP server "${args.name}" from ${scoped.scope} config: ${scoped.path}\nStatus: removed; newly started sessions will not load this registration.\n`,
 	);
 	process.stdout.write(`${renderDetails(entry)}\n`);
 }

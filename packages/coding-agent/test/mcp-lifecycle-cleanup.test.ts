@@ -37,7 +37,7 @@ describe("MCP lifecycle cleanup", () => {
 
 	it("disconnectServer aborts pending initial connection work", async () => {
 		let capturedSignal: AbortSignal | undefined;
-		let closedLateConnection = false;
+		let lateConnectionCloseCount = 0;
 		const release = Promise.withResolvers<MCPServerConnection>();
 		mock.module("../src/runtime-mcp/client", () => ({
 			...mcpClient,
@@ -61,14 +61,14 @@ describe("MCP lifecycle cleanup", () => {
 
 		release.resolve(
 			makeConnection("slow", async () => {
-				closedLateConnection = true;
+				lateConnectionCloseCount++;
 			}),
 		);
 		await load;
 		await Bun.sleep(0);
 
 		expect(manager.getConnection("slow")).toBeUndefined();
-		expect(closedLateConnection).toBe(true);
+		expect(lateConnectionCloseCount).toBe(1);
 	});
 
 	it("disconnectAll aborts pending initial connection work", async () => {
@@ -97,6 +97,51 @@ describe("MCP lifecycle cleanup", () => {
 		release.resolve(makeConnection("slow"));
 		await load;
 		expect(manager.getConnection("slow")).toBeUndefined();
+	});
+
+	it("disconnectAll closes each successfully owned connection exactly once", async () => {
+		const close = mock(async () => {});
+		mock.module("../src/runtime-mcp/client", () => ({
+			...mcpClient,
+			connectToServer: async (name: string) => makeConnection(name, close),
+			listTools: async () => [],
+		}));
+		const { MCPManager: MockedManager } = await import("../src/runtime-mcp/manager");
+		const manager = new MockedManager(process.cwd());
+
+		const result = await manager.connectServers(
+			{ owned: { type: "stdio", command: "synthetic" } },
+			{ owned: { provider: "test", providerName: "Test", path: "test", level: "user" } },
+		);
+		expect(result.connectedServers).toEqual(["owned"]);
+
+		await manager.disconnectAll();
+		await manager.disconnectAll();
+
+		expect(close).toHaveBeenCalledTimes(1);
+	});
+
+	it("closes a connection exactly once when initial tool enumeration fails", async () => {
+		const close = mock(async () => {});
+		mock.module("../src/runtime-mcp/client", () => ({
+			...mcpClient,
+			connectToServer: async (name: string) => makeConnection(name, close),
+			listTools: async () => {
+				throw new Error("synthetic tools/list failure");
+			},
+		}));
+		const { MCPManager: MockedManager } = await import("../src/runtime-mcp/manager");
+		const manager = new MockedManager(process.cwd());
+
+		const result = await manager.connectServers(
+			{ failing: { type: "stdio", command: "synthetic" } },
+			{ failing: { provider: "test", providerName: "Test", path: "test", level: "user" } },
+		);
+		await manager.disconnectAll();
+
+		expect(result.connectedServers).toEqual([]);
+		expect(result.errors.get("failing")).toContain("synthetic tools/list failure");
+		expect(close).toHaveBeenCalledTimes(1);
 	});
 
 	it("connectServers fails fast when an uncached MCP startup ignores abort", async () => {

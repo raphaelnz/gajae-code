@@ -16,6 +16,8 @@ export interface LoadContext {
 	home: string;
 	/** Git repository root (directory containing .git), or null if not in a repo */
 	repoRoot: string | null;
+	/** Exact source files a provider may inspect for a constrained load. */
+	sourcePaths?: readonly string[];
 }
 
 /**
@@ -66,6 +68,10 @@ export interface LoadOptions {
 	excludeProviders?: string[];
 	/** Custom cwd. Default: getProjectDir() */
 	cwd?: string;
+	/** Custom user home. Default: os.homedir(). Primarily for isolated runtime probes. */
+	home?: string;
+	/** Exact source files providers may inspect for a constrained load. */
+	sourcePaths?: readonly string[];
 	/** Include items even if they fail validation. Default: false */
 	includeInvalid?: boolean;
 	/** Include items disabled via settings. Default: false */

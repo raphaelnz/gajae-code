@@ -60,10 +60,10 @@ describe("gjc mcp CLI helpers", () => {
 		});
 		expect(stdoutText(stdout)).toContain('"API_TOKEN": "<redacted>"');
 		expect(stdoutText(stdout)).not.toContain("super-secret");
-		expect(stdoutText(stdout)).toContain('"runtimeStatus": "storage-only"');
-		expect(stdoutText(stdout)).toContain('"runtimeLoadedByStandalone": false');
+		expect(stdoutText(stdout)).toContain('"runtimeStatus": "autoload-eligible"');
+		expect(stdoutText(stdout)).toContain('"runtimeLoadedByStandalone": true');
 		expect(stdoutText(stdout)).toContain(
-			'"runtimeNote": "Stored MCP registrations are not loaded by normal standalone gjc sessions today."',
+			'"runtimeNote": "Enabled user MCP registrations with autoload not set to false are loaded by newly started normal standalone text/default/print sessions."',
 		);
 
 		stdout.mockClear();
@@ -71,10 +71,10 @@ describe("gjc mcp CLI helpers", () => {
 		expect(stdoutText(stdout)).toContain('"name": "context7"');
 		expect(stdoutText(stdout)).toContain('"API_TOKEN": "<redacted>"');
 		expect(stdoutText(stdout)).not.toContain("super-secret");
-		expect(stdoutText(stdout)).toContain('"runtimeStatus": "storage-only"');
-		expect(stdoutText(stdout)).toContain('"runtimeLoadedByStandalone": false');
+		expect(stdoutText(stdout)).toContain('"runtimeStatus": "autoload-eligible"');
+		expect(stdoutText(stdout)).toContain('"runtimeLoadedByStandalone": true');
 		expect(stdoutText(stdout)).toContain(
-			'"runtimeNote": "Stored MCP registrations are not loaded by normal standalone gjc sessions today."',
+			'"runtimeNote": "Enabled user MCP registrations with autoload not set to false are loaded by newly started normal standalone text/default/print sessions."',
 		);
 
 		stdout.mockClear();
@@ -82,10 +82,10 @@ describe("gjc mcp CLI helpers", () => {
 		expect(stdoutText(stdout)).toContain('"status": "removed"');
 		expect(stdoutText(stdout)).toContain('"API_TOKEN": "<redacted>"');
 		expect(stdoutText(stdout)).not.toContain("super-secret");
-		expect(stdoutText(stdout)).toContain('"runtimeStatus": "storage-only"');
-		expect(stdoutText(stdout)).toContain('"runtimeLoadedByStandalone": false');
+		expect(stdoutText(stdout)).toContain('"runtimeStatus": "autoload-eligible"');
+		expect(stdoutText(stdout)).toContain('"runtimeLoadedByStandalone": true');
 		expect(stdoutText(stdout)).toContain(
-			'"runtimeNote": "Stored MCP registrations are not loaded by normal standalone gjc sessions today."',
+			'"runtimeNote": "Enabled user MCP registrations with autoload not set to false are loaded by newly started normal standalone text/default/print sessions."',
 		);
 		expect((await readMCPConfigFile(configPath)).mcpServers).toEqual({});
 	});
@@ -119,7 +119,7 @@ describe("gjc mcp CLI helpers", () => {
 		const output = stdoutText(stdout);
 		expect(output).toContain("docs\thttp\thttps://example.test/mcp");
 		expect(output).toContain("Status: storage-only");
-		expect(output).toContain("normal standalone gjc sessions do not load stored MCP registrations today");
+		expect(output).toContain("Project MCP registrations remain storage-only");
 		expect(output).toContain('"Authorization": "<redacted>"');
 		expect(output).toContain('"X-Public": "<redacted>"');
 		expect(output).not.toContain("Bearer real-token");
@@ -128,7 +128,35 @@ describe("gjc mcp CLI helpers", () => {
 		stdout.mockClear();
 		await runMCPCommand({ action: "remove", name: "docs", flags: { project: true }, cwd: projectDir });
 		expect(stdoutText(stdout)).toContain('Removed MCP server "docs"');
-		expect(stdoutText(stdout)).toContain("Status: storage-only");
+		expect(stdoutText(stdout)).toContain("Status: removed");
+	});
+
+	it("marks disabled user registrations as ineligible for standalone autoload", async () => {
+		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		const configPath = getMCPConfigPath("user", projectDir);
+		await fs.mkdir(path.dirname(configPath), { recursive: true });
+		await fs.writeFile(
+			configPath,
+			JSON.stringify({
+				disabledServers: ["disabledByName"],
+				mcpServers: {
+					disabledByAutoload: { type: "stdio", command: "tool", autoload: false },
+					disabledByName: { type: "stdio", command: "tool" },
+				},
+			}),
+		);
+
+		await runMCPCommand({ action: "list", flags: { json: true }, cwd: projectDir });
+
+		const output = JSON.parse(stdoutText(stdout)) as {
+			servers: Array<{ name: string; runtimeStatus: string; runtimeLoadedByStandalone: boolean }>;
+		};
+		for (const name of ["disabledByAutoload", "disabledByName"]) {
+			expect(output.servers.find(server => server.name === name)).toMatchObject({
+				runtimeStatus: "autoload-disabled",
+				runtimeLoadedByStandalone: false,
+			});
+		}
 	});
 
 	it("redacts URL and stdio argument secrets from public output", async () => {

@@ -5,6 +5,7 @@ import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
+import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
@@ -170,6 +171,8 @@ export interface ToolSession {
 	taskDepth?: number;
 	/** Current role-agent type/name for nested task sessions. */
 	currentAgentType?: string;
+	/** Immutable plugin-only MCP tools authorized for this session's children. */
+	getInheritedPluginMcpTools?: () => readonly CustomTool[];
 	/** Get session file */
 	getSessionFile: () => string | null;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
