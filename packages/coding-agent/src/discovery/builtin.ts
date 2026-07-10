@@ -111,6 +111,64 @@ async function findNearestProjectConfigDir(
 }
 
 // MCP
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isOptionalString(value: unknown): boolean {
+	return value === undefined || typeof value === "string";
+}
+
+function isStringRecord(value: unknown): boolean {
+	return isPlainRecord(value) && Object.values(value).every(entry => typeof entry === "string");
+}
+
+function isStrictAuth(value: unknown): boolean {
+	if (value === undefined) return true;
+	if (!isPlainRecord(value) || (value.type !== "oauth" && value.type !== "apikey")) return false;
+	return ["credentialId", "tokenUrl", "clientId", "clientSecret"].every(key => isOptionalString(value[key]));
+}
+
+function isStrictOAuth(value: unknown): boolean {
+	if (value === undefined) return true;
+	if (!isPlainRecord(value)) return false;
+	if (!["clientId", "clientSecret", "redirectUri", "callbackPath"].every(key => isOptionalString(value[key])))
+		return false;
+	return (
+		value.callbackPort === undefined ||
+		(typeof value.callbackPort === "number" &&
+			Number.isInteger(value.callbackPort) &&
+			value.callbackPort > 0 &&
+			value.callbackPort <= 65_535)
+	);
+}
+
+function isStrictMCPServerConfig(value: unknown): value is Record<string, unknown> {
+	if (!isPlainRecord(value)) return false;
+	if (value.enabled !== undefined && typeof value.enabled !== "boolean") return false;
+	if (value.autoload !== undefined && typeof value.autoload !== "boolean") return false;
+	if (value.noInheritEnv !== undefined && typeof value.noInheritEnv !== "boolean") return false;
+	if (
+		value.timeout !== undefined &&
+		(typeof value.timeout !== "number" || !Number.isFinite(value.timeout) || value.timeout <= 0)
+	)
+		return false;
+	if (value.args !== undefined && (!Array.isArray(value.args) || !value.args.every(arg => typeof arg === "string")))
+		return false;
+	if (value.env !== undefined && !isStringRecord(value.env)) return false;
+	if (value.headers !== undefined && !isStringRecord(value.headers)) return false;
+	if (!isOptionalString(value.cwd) || !isStrictAuth(value.auth) || !isStrictOAuth(value.oauth)) return false;
+
+	const hasCommand = typeof value.command === "string" && value.command.length > 0;
+	const hasUrl = typeof value.url === "string" && value.url.length > 0;
+	if ((value.command !== undefined && !hasCommand) || (value.url !== undefined && !hasUrl) || hasCommand === hasUrl)
+		return false;
+	if (value.type !== undefined && value.type !== "stdio" && value.type !== "http" && value.type !== "sse")
+		return false;
+	if (value.type === "stdio" && !hasCommand) return false;
+	if ((value.type === "http" || value.type === "sse") && !hasUrl) return false;
+	return true;
+}
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 	const items: MCPServer[] = [];
 	const warnings: string[] = [];
@@ -118,7 +176,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 
 	const parseMcpServers = (content: string, sourcePath: string, level: "user" | "project"): MCPServer[] => {
 		const result: MCPServer[] = [];
-		let data: { mcpServers?: Record<string, unknown> } | null;
+		let data: { disabledServers?: unknown; mcpServers?: unknown } | null;
 		if (strictSourcePaths) {
 			try {
 				const parsed: unknown = JSON.parse(content);
@@ -126,23 +184,37 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					warnings.push("Invalid MCP configuration");
 					return result;
 				}
-				data = parsed as { mcpServers?: Record<string, unknown> };
+				data = parsed as { disabledServers?: unknown; mcpServers?: unknown };
 			} catch {
 				warnings.push("Invalid MCP configuration");
 				return result;
 			}
 		} else {
-			data = tryParseJson<{ mcpServers?: Record<string, unknown> }>(content);
+			data = tryParseJson<{ disabledServers?: unknown; mcpServers?: unknown }>(content);
 		}
-		if (!data?.mcpServers) return result;
-		if (typeof data.mcpServers !== "object" || Array.isArray(data.mcpServers)) {
-			if (strictSourcePaths) warnings.push("Invalid MCP configuration");
-			return result;
+		if (strictSourcePaths) {
+			if (
+				data?.disabledServers !== undefined &&
+				(!Array.isArray(data.disabledServers) ||
+					!data.disabledServers.every(serverName => typeof serverName === "string"))
+			) {
+				warnings.push("Invalid MCP configuration");
+				return result;
+			}
+			if (data?.mcpServers !== undefined && !isPlainRecord(data.mcpServers)) {
+				warnings.push("Invalid MCP configuration");
+				return result;
+			}
 		}
+		if (!data?.mcpServers || !isPlainRecord(data.mcpServers)) return result;
 
 		const expanded = expandEnvVarsDeep(data.mcpServers);
 		for (const [serverName, config] of Object.entries(expanded)) {
 			const serverConfig = config as Record<string, unknown>;
+			if (strictSourcePaths && !isStrictMCPServerConfig(config)) {
+				warnings.push("Invalid MCP configuration");
+				continue;
+			}
 
 			// Validate enabled: coerce string "true"/"false", warn on other types
 			let enabled: boolean | undefined;

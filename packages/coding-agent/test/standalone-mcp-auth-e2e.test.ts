@@ -242,36 +242,63 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 		}
 	});
 
-	it("rejects a mixed valid and invalid exact-source catalog before connecting either entry", async () => {
-		const cwd = path.join(root, "project");
-		const userConfigPath = path.join(getAgentDir(), "mcp.json");
-		const fixture = path.join(import.meta.dir, "fixtures/gjc-plugins/valid-mcp-bundle/mcp/server.ts");
-		await fs.mkdir(cwd, { recursive: true });
-		await fs.writeFile(
-			userConfigPath,
-			JSON.stringify({
-				mcpServers: {
-					healthy: { type: "stdio", command: process.execPath, args: [fixture] },
-					invalid: { type: "stdio" },
-				},
-			}),
-		);
+	const invalidCatalogCases: Array<[string, Record<string, unknown>]> = [
+		["missing endpoint", { type: "stdio" }],
+		["unknown transport", { type: "bogus", command: process.execPath }],
+		["conflicting endpoints", { type: "stdio", command: process.execPath, url: "http://127.0.0.1" }],
+		["string enabled coercion", { type: "stdio", command: process.execPath, enabled: "malformed-secret-canary" }],
+		["string timeout coercion", { type: "stdio", command: process.execPath, timeout: "1000" }],
+		["string autoload coercion", { type: "stdio", command: process.execPath, autoload: "true" }],
+		["string environment inheritance coercion", { type: "stdio", command: process.execPath, noInheritEnv: "true" }],
+		["malformed arguments", { type: "stdio", command: process.execPath, args: [1] }],
+		["malformed environment", { type: "stdio", command: process.execPath, env: { TOKEN: 1 } }],
+		["malformed headers", { type: "http", url: "http://127.0.0.1", headers: { Authorization: 1 } }],
+		["malformed auth", { type: "http", url: "http://127.0.0.1", auth: { type: "unknown" } }],
+		["malformed oauth callback", { type: "http", url: "http://127.0.0.1", oauth: { callbackPort: -1 } }],
+	];
 
-		const loaded = await discoverAndLoadMCPTools(cwd, {
-			enableProjectConfig: false,
-			autoloadOnly: true,
-			providers: ["native"],
-			home: root,
-			sourcePaths: [userConfigPath],
-			filterExa: false,
-			cacheStorage: null,
+	for (const [caseName, invalidConfig] of invalidCatalogCases) {
+		it(`rejects ${caseName} before connecting a healthy catalog peer`, async () => {
+			const cwd = path.join(root, "project");
+			const userConfigPath = path.join(getAgentDir(), "mcp.json");
+			let requestCount = 0;
+			const httpServer = Bun.serve({
+				port: 0,
+				async fetch(request) {
+					requestCount += 1;
+					return Response.json(rpcResult((await request.json()) as JsonRpcMessage));
+				},
+			});
+			await fs.mkdir(cwd, { recursive: true });
+			await fs.writeFile(
+				userConfigPath,
+				JSON.stringify({
+					mcpServers: {
+						healthy: { type: "http", url: httpServer.url.href },
+						invalid: invalidConfig,
+					},
+				}),
+			);
+
+			const loaded = await discoverAndLoadMCPTools(cwd, {
+				enableProjectConfig: false,
+				autoloadOnly: true,
+				providers: ["native"],
+				home: root,
+				sourcePaths: [userConfigPath],
+				filterExa: false,
+				cacheStorage: null,
+			});
+			try {
+				expect(loaded.tools).toEqual([]);
+				expect(loaded.connectedServers).toEqual([]);
+				expect(loaded.errors).toEqual([{ path: ".mcp.json", error: "MCP configuration is invalid" }]);
+				expect(JSON.stringify(loaded.errors)).not.toContain("malformed-secret-canary");
+				expect(requestCount).toBe(0);
+			} finally {
+				await loaded.manager.disconnectAll();
+				await httpServer.stop(true);
+			}
 		});
-		try {
-			expect(loaded.tools).toEqual([]);
-			expect(loaded.connectedServers).toEqual([]);
-			expect(loaded.errors).toEqual([{ path: ".mcp.json", error: "MCP configuration is invalid" }]);
-		} finally {
-			await loaded.manager.disconnectAll();
-		}
-	});
+	}
 });
