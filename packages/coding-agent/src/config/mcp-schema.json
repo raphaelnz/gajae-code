@@ -177,6 +177,7 @@
             "url": {
               "type": "string",
               "minLength": 1,
+              "pattern": "^https?://",
               "description": "MCP endpoint URL. Public CLI output redacts userinfo, query values, and fragments."
             },
             "headers": {
@@ -208,6 +209,7 @@
             "url": {
               "type": "string",
               "minLength": 1,
+              "pattern": "^https?://",
               "description": "Legacy SSE endpoint URL. Public CLI output redacts userinfo, query values, and fragments."
             },
             "headers": {

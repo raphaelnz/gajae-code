@@ -8,8 +8,9 @@ import {
 	setServerAutoload,
 	setServerDisabled,
 	upsertMCPServer,
+	writeMCPConfigFile,
 } from "../../src/runtime-mcp/config-writer";
-import type { MCPServerConfig } from "../../src/runtime-mcp/types";
+import { MCP_CONFIG_SCHEMA_URL, type MCPServerConfig } from "../../src/runtime-mcp/types";
 
 let tmpDir: string;
 let configPath: string;
@@ -57,6 +58,20 @@ describe("upsertMCPServer", () => {
 		// Missing `command`/`url` is not a valid MCP server config.
 		await expect(upsertMCPServer(configPath, "alpha", {} as MCPServerConfig)).rejects.toThrow();
 		expect(await getMCPServer(configPath, "alpha")).toBeUndefined();
+	});
+	test("rejects non-positive timeouts and non-HTTP network URLs", async () => {
+		await expect(upsertMCPServer(configPath, "timeout", { command: "bin", timeout: 0 })).rejects.toThrow();
+		await expect(
+			upsertMCPServer(configPath, "network", { type: "http", url: "file:///tmp/mcp.sock" }),
+		).rejects.toThrow();
+		expect(await getMCPServer(configPath, "timeout")).toBeUndefined();
+		expect(await getMCPServer(configPath, "network")).toBeUndefined();
+	});
+
+	test("always writes a default schema reference when a caller supplies undefined", async () => {
+		await writeMCPConfigFile(configPath, { $schema: undefined, mcpServers: {} });
+		const written = JSON.parse(await fs.readFile(configPath, "utf8")) as Record<string, unknown>;
+		expect(written.$schema).toBe(MCP_CONFIG_SCHEMA_URL);
 	});
 
 	test("preserves autoload:false when force-updating a server without the flag", async () => {

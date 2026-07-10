@@ -6,7 +6,11 @@ import { getAgentDir, setAgentDir } from "@gajae-code/utils";
 import { writeMCPConfigFile } from "../src/runtime-mcp/config-writer";
 import { discoverAndLoadMCPTools } from "../src/runtime-mcp/loader";
 import type { JsonRpcMessage } from "../src/runtime-mcp/types";
-import { createSyntheticAuthStorage, syntheticZeroToolServerScript } from "./mcp-test-utils";
+import {
+	createSyntheticAuthStorage,
+	syntheticEnvEchoServerScript,
+	syntheticZeroToolServerScript,
+} from "./mcp-test-utils";
 
 function rpcResult(body: JsonRpcMessage): Record<string, unknown> {
 	const id = "id" in body ? body.id : 0;
@@ -108,7 +112,7 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 				stdioOauth: {
 					type: "stdio",
 					command: process.execPath,
-					args: [fixture],
+					args: ["-e", syntheticEnvEchoServerScript("OAUTH_ACCESS_TOKEN")],
 					auth: { type: "oauth", credentialId: "synthetic-mcp-oauth" },
 					oauth: { clientId: "synthetic-client" },
 				},
@@ -178,6 +182,9 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 				});
 			}
 
+			const stdioOauthTool = loaded.tools.find(entry => entry.tool.name === "mcp__stdiooauth_lookup")?.tool;
+			const stdioOauthResult = await stdioOauthTool?.execute("synthetic-oauth-call", {}, undefined, {} as never);
+			expect(stdioOauthResult?.content).toEqual([{ type: "text", text: "env=synthetic-access-token" }]);
 			const acceptedTool = loaded.tools.find(entry => entry.tool.name === "mcp__absolute_lookup")?.tool;
 			expect(acceptedTool).toBeDefined();
 			await fs.writeFile(

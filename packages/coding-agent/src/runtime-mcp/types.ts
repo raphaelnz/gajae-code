@@ -122,6 +122,108 @@ export interface MCPConfigFile {
 	mcpServers?: Record<string, MCPServerConfig>;
 	disabledServers?: string[];
 }
+const MCP_SERVER_KEYS = new Set([
+	"args",
+	"auth",
+	"autoload",
+	"command",
+	"cwd",
+	"enabled",
+	"env",
+	"headers",
+	"noInheritEnv",
+	"oauth",
+	"timeout",
+	"type",
+	"url",
+]);
+const MCP_AUTH_KEYS = new Set(["clientId", "clientSecret", "credentialId", "tokenUrl", "type"]);
+const MCP_OAUTH_KEYS = new Set(["callbackPath", "callbackPort", "clientId", "clientSecret", "redirectUri"]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+	return Object.keys(value).every(key => allowed.has(key));
+}
+
+function isOptionalString(value: unknown): boolean {
+	return value === undefined || typeof value === "string";
+}
+
+function isStringRecord(value: unknown): boolean {
+	return isRecord(value) && Object.values(value).every(entry => typeof entry === "string");
+}
+
+function isAuthConfig(value: unknown): boolean {
+	if (value === undefined) return true;
+	if (!isRecord(value) || !hasOnlyKeys(value, MCP_AUTH_KEYS) || (value.type !== "oauth" && value.type !== "apikey"))
+		return false;
+	return ["credentialId", "tokenUrl", "clientId", "clientSecret"].every(key => isOptionalString(value[key]));
+}
+
+function isOAuthConfig(value: unknown): boolean {
+	if (value === undefined) return true;
+	if (!isRecord(value) || !hasOnlyKeys(value, MCP_OAUTH_KEYS)) return false;
+	if (!["clientId", "clientSecret", "redirectUri", "callbackPath"].every(key => isOptionalString(value[key])))
+		return false;
+	return (
+		value.callbackPort === undefined ||
+		(typeof value.callbackPort === "number" &&
+			Number.isInteger(value.callbackPort) &&
+			value.callbackPort > 0 &&
+			value.callbackPort <= 65_535)
+	);
+}
+
+export function validateMCPServerConfigShape(serverName: string, value: unknown): string[] {
+	const invalid = (reason: string): string[] => [`Server "${serverName}": ${reason}`];
+	if (!/^[a-zA-Z0-9_.-]{1,100}$/.test(serverName)) return invalid("invalid server name");
+	if (!isRecord(value) || !hasOnlyKeys(value, MCP_SERVER_KEYS)) return invalid("unknown or malformed fields");
+	if (value.enabled !== undefined && typeof value.enabled !== "boolean") return invalid("enabled must be boolean");
+	if (value.autoload !== undefined && typeof value.autoload !== "boolean") return invalid("autoload must be boolean");
+	if (value.noInheritEnv !== undefined && typeof value.noInheritEnv !== "boolean")
+		return invalid("noInheritEnv must be boolean");
+	if (
+		value.timeout !== undefined &&
+		(typeof value.timeout !== "number" || !Number.isFinite(value.timeout) || value.timeout <= 0)
+	)
+		return invalid("timeout must be a positive number");
+	if (value.args !== undefined && (!Array.isArray(value.args) || !value.args.every(arg => typeof arg === "string")))
+		return invalid("args must be strings");
+	if (value.env !== undefined && !isStringRecord(value.env)) return invalid("env values must be strings");
+	if (value.headers !== undefined && !isStringRecord(value.headers)) return invalid("header values must be strings");
+	if (!isOptionalString(value.cwd) || !isAuthConfig(value.auth) || !isOAuthConfig(value.oauth))
+		return invalid("authentication or working-directory fields are malformed");
+
+	const hasCommand = typeof value.command === "string" && value.command.length > 0;
+	const hasUrl = typeof value.url === "string" && value.url.length > 0;
+	if ((value.command !== undefined && !hasCommand) || (value.url !== undefined && !hasUrl) || hasCommand === hasUrl)
+		return invalid("exactly one endpoint is required");
+	if (value.type !== undefined && value.type !== "stdio" && value.type !== "http" && value.type !== "sse")
+		return invalid("unknown server type");
+	const transport = value.type ?? "stdio";
+	if (transport === "stdio") {
+		if (!hasCommand || value.headers !== undefined) return invalid("stdio fields are incompatible");
+	} else {
+		if (
+			!hasUrl ||
+			value.args !== undefined ||
+			value.env !== undefined ||
+			value.noInheritEnv !== undefined ||
+			value.cwd !== undefined
+		)
+			return invalid("network transport fields are incompatible");
+		try {
+			const protocol = new URL(value.url as string).protocol;
+			if (protocol !== "http:" && protocol !== "https:") return invalid("URL must use HTTP or HTTPS");
+		} catch {
+			return invalid("URL must be valid");
+		}
+	}
+	return [];
+}
 
 // =============================================================================
 // MCP Protocol Types

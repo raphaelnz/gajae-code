@@ -66,3 +66,41 @@ rl.on("line", line => {
 });
 `;
 }
+export function syntheticEnvEchoServerScript(variableName: string): string {
+	return `
+const readline = require("node:readline");
+const variableName = ${JSON.stringify(variableName)};
+const rl = readline.createInterface({ input: process.stdin });
+const send = message => process.stdout.write(JSON.stringify(message) + "\\n");
+rl.on("line", line => {
+	const request = JSON.parse(line);
+	if (request.method === "initialize") {
+		send({
+			jsonrpc: "2.0",
+			id: request.id,
+			result: {
+				protocolVersion: "2024-11-05",
+				capabilities: { tools: {} },
+				serverInfo: { name: "synthetic-env-echo", version: "1" },
+			},
+		});
+	} else if (request.method === "tools/list") {
+		send({
+			jsonrpc: "2.0",
+			id: request.id,
+			result: {
+				tools: [{ name: "lookup", description: "Echo one environment value", inputSchema: { type: "object" } }],
+			},
+		});
+	} else if (request.method === "tools/call") {
+		send({
+			jsonrpc: "2.0",
+			id: request.id,
+			result: { content: [{ type: "text", text: "env=" + (process.env[variableName] || "<absent>") }] },
+		});
+	} else if (request.id !== undefined) {
+		send({ jsonrpc: "2.0", id: request.id, result: {} });
+	}
+});
+`;
+}

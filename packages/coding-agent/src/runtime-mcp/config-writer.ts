@@ -13,8 +13,8 @@ import { MCP_CONFIG_SCHEMA_URL, type MCPConfigFile, type MCPServerConfig } from 
 
 function withSchema(config: MCPConfigFile): MCPConfigFile {
 	return {
-		$schema: config.$schema ?? MCP_CONFIG_SCHEMA_URL,
 		...config,
+		$schema: config.$schema ?? MCP_CONFIG_SCHEMA_URL,
 	};
 }
 
