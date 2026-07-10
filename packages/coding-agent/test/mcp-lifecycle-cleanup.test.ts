@@ -144,6 +144,28 @@ describe("MCP lifecycle cleanup", () => {
 		expect(close).toHaveBeenCalledTimes(1);
 	});
 
+	it("waits for an uncached MCP within the default connection timeout", async () => {
+		mock.module("../src/runtime-mcp/client", () => ({
+			...mcpClient,
+			connectToServer: async (name: string) => {
+				await Bun.sleep(350);
+				return makeConnection(name);
+			},
+			listTools: async () => [],
+		}));
+		const { MCPManager: MockedManager } = await import("../src/runtime-mcp/manager");
+		const manager = new MockedManager(process.cwd());
+
+		const result = await manager.connectServers(
+			{ slow: { type: "stdio", command: "slow" } },
+			{ slow: { provider: "test", providerName: "Test", path: "test", level: "user" } },
+		);
+
+		expect(result.connectedServers).toEqual(["slow"]);
+		expect(result.errors.size).toBe(0);
+		await manager.disconnectAll();
+	});
+
 	it("connectServers fails fast when an uncached MCP startup ignores abort", async () => {
 		let capturedSignal: AbortSignal | undefined;
 		mock.module("../src/runtime-mcp/client", () => ({
@@ -159,7 +181,7 @@ describe("MCP lifecycle cleanup", () => {
 
 		const startedAt = Date.now();
 		const result = await manager.connectServers(
-			{ stuck: { type: "stdio", command: "stuck", timeout: 10_000 } },
+			{ stuck: { type: "stdio", command: "stuck", timeout: 100 } },
 			{ stuck: { provider: "test", providerName: "Test", path: "test", level: "project" } },
 		);
 

@@ -57,19 +57,12 @@ type TrackedPromise<T> = {
 	reason?: unknown;
 };
 
-const STARTUP_TIMEOUT_MS = 250;
+const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const STARTUP_TIMEOUT_GRACE_MS = 500;
-const MAX_STARTUP_TIMEOUT_MS = 1_750;
 
 function resolveStartupTimeoutMs(configs: MCPServerConfig[]): number {
-	const configuredTimeouts = configs
-		.map(config => config.timeout)
-		.filter((timeout): timeout is number => typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0);
-	if (configuredTimeouts.length === 0) return STARTUP_TIMEOUT_MS;
-	return Math.min(
-		MAX_STARTUP_TIMEOUT_MS,
-		Math.max(STARTUP_TIMEOUT_MS, Math.max(...configuredTimeouts) + STARTUP_TIMEOUT_GRACE_MS),
-	);
+	const timeouts = configs.map(config => config.timeout ?? DEFAULT_STARTUP_TIMEOUT_MS);
+	return (timeouts.length > 0 ? Math.max(...timeouts) : DEFAULT_STARTUP_TIMEOUT_MS) + STARTUP_TIMEOUT_GRACE_MS;
 }
 
 function trackPromise<T>(promise: Promise<T>): TrackedPromise<T> {
