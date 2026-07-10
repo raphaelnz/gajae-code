@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -99,6 +99,35 @@ describe("owner, type, and exact-mode guards", () => {
 		await expect(requireCurrentUserOwnership(directory, { kind: "directory" })).resolves.toBeUndefined();
 		await expect(requireCurrentUserOwnership(file, { kind: "file" })).resolves.toBeUndefined();
 		await expect(requireCurrentUserOwnership(executable, { kind: "executable" })).resolves.toBeUndefined();
+	});
+
+	test("rejects a correctly-moded managed file and roots when the effective UID differs", async () => {
+		const temporary = await root();
+		const home = await fs.realpath(temporary);
+		const paths = resolveUpdaterPaths({
+			HOME: home,
+			XDG_DATA_HOME: path.join(home, "data"),
+			XDG_CONFIG_HOME: path.join(home, "config"),
+			XDG_STATE_HOME: path.join(home, "state"),
+			XDG_CACHE_HOME: path.join(home, "cache"),
+		});
+		await ensureManagedRoots(paths, true);
+		await fs.writeFile(paths.statePath, "{}", { mode: PRIVATE_FILE_MODE });
+		await fs.chmod(paths.statePath, PRIVATE_FILE_MODE);
+
+		const currentUid = process.getuid?.();
+		if (currentUid === undefined) throw new Error("test requires current user ownership");
+		await expect(requireCurrentUserOwnership(paths.statePath, { kind: "file" })).resolves.toBeUndefined();
+		await expect(ensureManagedRoots(paths, false)).resolves.toBeUndefined();
+		const getuid = spyOn(process, "getuid").mockReturnValue(currentUid + 1);
+		try {
+			await expect(requireCurrentUserOwnership(paths.statePath, { kind: "file" })).rejects.toThrow(
+				"not owned by the current user",
+			);
+			await expect(ensureManagedRoots(paths, false)).rejects.toThrow("canonical ownership");
+		} finally {
+			getuid.mockRestore();
+		}
 	});
 
 	test("rejects group/world permission drift for every managed object class", async () => {

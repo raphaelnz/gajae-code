@@ -394,15 +394,15 @@ test("check is byte-for-byte read-only and reports a candidate", async () => {
 
 test("prepare failure leaves current immutable", async () => {
 	const value = await installed();
-	const before = await fs.readlink(value.paths.currentPath);
+	const before = await snapshot(value.paths);
 	const result = await update({
 		paths: value.paths,
 		prepareUpdate: async () => {
 			throw new Error("build failed");
 		},
 	});
-	expect(result.changed).toBe(false);
-	expect(await fs.readlink(value.paths.currentPath)).toBe(before);
+	expect(result).toEqual({ code: "GJC_MCP_E_VERIFY", changed: false });
+	expect(await snapshot(value.paths)).toEqual(before);
 });
 
 test("rollback swaps current and previous while preserving observed tag history", async () => {

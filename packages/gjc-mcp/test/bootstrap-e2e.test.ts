@@ -8,6 +8,7 @@ import { resolveUpdaterPaths, type UpdaterPaths } from "../src/paths";
 import {
 	type BuildContext,
 	buildBaselineFallbackRelease,
+	buildCandidateRelease,
 	type ReleaseSource,
 	seedBaselineNativeAddon,
 	verifyRelease,
@@ -262,6 +263,53 @@ describe("isolated bootstrap through production release and transaction seams", 
 			buildBaselineFallbackRelease(await fallbackContext(paths, fallbackTarget), source),
 		).rejects.toMatchObject({ code: "GJC_MCP_E_BUILD" });
 		expect((await fs.readdir(paths.worktreesRoot)).filter(name => name.startsWith(".fallback-build-home-"))).toEqual(
+			[],
+		);
+	});
+	test("builds patched candidates with one private staged Bun and removes build HOME on success and failure", async () => {
+		const success = await isolatedPaths();
+		const successSource: ReleaseSource = {
+			...(await baselineSource(success.paths)),
+			kind: "patched",
+			patchBase: "2".repeat(40),
+			patchTip: "3".repeat(40),
+			runtimePolicySha256: "4".repeat(64),
+		};
+
+		const release = await buildCandidateRelease(
+			await fallbackContext(success.paths, success.fallbackTarget),
+			successSource,
+		);
+		const stagedBuns = (await fs.readFile(path.join(successSource.worktree, ".nested-bun-marker"), "utf8"))
+			.trim()
+			.split("\n");
+		const buildHome = path.dirname(path.dirname(stagedBuns[0]));
+
+		expect(release.kind).toBe("patched");
+		expect(stagedBuns).toHaveLength(4);
+		expect(new Set(stagedBuns).size).toBe(1);
+		expect(path.basename(stagedBuns[0])).toBe("bun");
+		expect(path.basename(path.dirname(stagedBuns[0]))).toBe(".trusted-bin");
+		expect(path.basename(buildHome)).toStartWith(".build-home-");
+		expect(path.dirname(buildHome)).toBe(success.paths.worktreesRoot);
+		expect((await fs.readdir(success.paths.worktreesRoot)).filter(name => name.startsWith(".build-home-"))).toEqual(
+			[],
+		);
+
+		const failure = await isolatedPaths();
+		const failureSource: ReleaseSource = {
+			...(await baselineSource(failure.paths)),
+			kind: "patched",
+			patchBase: "2".repeat(40),
+			patchTip: "3".repeat(40),
+			runtimePolicySha256: "4".repeat(64),
+		};
+		await fs.writeFile(path.join(failureSource.worktree, ".fail-build"), "fail\n", { mode: 0o600 });
+
+		await expect(
+			buildCandidateRelease(await fallbackContext(failure.paths, failure.fallbackTarget), failureSource),
+		).rejects.toMatchObject({ code: "GJC_MCP_E_BUILD" });
+		expect((await fs.readdir(failure.paths.worktreesRoot)).filter(name => name.startsWith(".build-home-"))).toEqual(
 			[],
 		);
 	});
