@@ -36,11 +36,30 @@ export async function readMCPConfigFile(filePath: string): Promise<MCPConfigFile
 	}
 }
 
+/** Validate a complete MCP configuration before writing it. */
+function validateConfigFile(config: MCPConfigFile): void {
+	if (config.$schema !== undefined && typeof config.$schema !== "string")
+		throw new Error("Invalid MCP schema reference");
+	if (config.disabledServers !== undefined) {
+		if (
+			!Array.isArray(config.disabledServers) ||
+			!config.disabledServers.every(name => typeof name === "string" && name.length > 0) ||
+			new Set(config.disabledServers).size !== config.disabledServers.length
+		)
+			throw new Error("Invalid disabled MCP server list");
+	}
+	const errors = Object.entries(config.mcpServers ?? {}).flatMap(([name, server]) =>
+		validateServerConfig(name, server),
+	);
+	if (errors.length > 0) throw new Error(errors.join("\n"));
+}
+
 /**
  * Write an MCP config file atomically.
  * Creates parent directories if they don't exist.
  */
 export async function writeMCPConfigFile(filePath: string, config: MCPConfigFile): Promise<void> {
+	validateConfigFile(config);
 	// Ensure parent directory exists
 	const dir = path.dirname(filePath);
 	await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });

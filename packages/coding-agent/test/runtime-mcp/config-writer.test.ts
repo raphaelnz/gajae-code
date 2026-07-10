@@ -73,6 +73,14 @@ describe("upsertMCPServer", () => {
 		const written = JSON.parse(await fs.readFile(configPath, "utf8")) as Record<string, unknown>;
 		expect(written.$schema).toBe(MCP_CONFIG_SCHEMA_URL);
 	});
+	test("rejects invalid complete configurations before writing bytes", async () => {
+		await expect(
+			writeMCPConfigFile(configPath, {
+				mcpServers: { network: { type: "http", url: "file:///tmp/mcp.sock" } },
+			}),
+		).rejects.toThrow();
+		expect(await Bun.file(configPath).exists()).toBe(false);
+	});
 
 	test("preserves autoload:false when force-updating a server without the flag", async () => {
 		await upsertMCPServer(configPath, "alpha", stdio("alpha-bin"));
