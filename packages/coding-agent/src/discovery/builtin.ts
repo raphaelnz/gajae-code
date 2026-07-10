@@ -115,7 +115,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-const STRICT_ROOT_KEYS = new Set(["disabledServers", "mcpServers"]);
+const STRICT_ROOT_KEYS = new Set(["$schema", "disabledServers", "mcpServers"]);
 const STRICT_SERVER_KEYS = new Set([
 	"args",
 	"auth",
@@ -172,7 +172,8 @@ function isStrictOAuth(value: unknown): boolean {
 }
 
 function isStrictMCPServerConfig(serverName: string, value: unknown): value is Record<string, unknown> {
-	if (!serverName || !isPlainRecord(value) || !hasOnlyKeys(value, STRICT_SERVER_KEYS)) return false;
+	if (!/^[a-zA-Z0-9_.-]{1,100}$/.test(serverName) || !isPlainRecord(value) || !hasOnlyKeys(value, STRICT_SERVER_KEYS))
+		return false;
 	if (value.enabled !== undefined && typeof value.enabled !== "boolean") return false;
 	if (value.autoload !== undefined && typeof value.autoload !== "boolean") return false;
 	if (value.noInheritEnv !== undefined && typeof value.noInheritEnv !== "boolean") return false;
@@ -195,8 +196,7 @@ function isStrictMCPServerConfig(serverName: string, value: unknown): value is R
 		return false;
 	const transport = value.type ?? "stdio";
 	if (transport === "stdio") {
-		if (!hasCommand || value.headers !== undefined || value.auth !== undefined || value.oauth !== undefined)
-			return false;
+		if (!hasCommand || value.headers !== undefined) return false;
 	} else {
 		if (
 			!hasUrl ||
@@ -243,13 +243,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				warnings.push("Invalid MCP configuration");
 				return result;
 			}
-			if (
-				data?.disabledServers !== undefined &&
-				(!Array.isArray(data.disabledServers) ||
-					!data.disabledServers.every(serverName => typeof serverName === "string"))
-			) {
+			if (data.$schema !== undefined && typeof data.$schema !== "string") {
 				warnings.push("Invalid MCP configuration");
 				return result;
+			}
+			if (data.disabledServers !== undefined) {
+				if (
+					!Array.isArray(data.disabledServers) ||
+					!data.disabledServers.every(serverName => typeof serverName === "string" && serverName.length > 0) ||
+					new Set(data.disabledServers).size !== data.disabledServers.length
+				) {
+					warnings.push("Invalid MCP configuration");
+					return result;
+				}
 			}
 			if (data?.mcpServers !== undefined && !isPlainRecord(data.mcpServers)) {
 				warnings.push("Invalid MCP configuration");

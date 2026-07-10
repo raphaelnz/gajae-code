@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, setAgentDir } from "@gajae-code/utils";
+import { writeMCPConfigFile } from "../src/runtime-mcp/config-writer";
 import { discoverAndLoadMCPTools } from "../src/runtime-mcp/loader";
 import type { JsonRpcMessage } from "../src/runtime-mcp/types";
 import { createSyntheticAuthStorage, syntheticZeroToolServerScript } from "./mcp-test-utils";
@@ -99,41 +100,45 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 		);
 		await fs.writeFile(path.join(getAgentDir(), ".mcp.json"), "{");
 		const userConfigPath = path.join(getAgentDir(), "mcp.json");
-		await fs.writeFile(
-			userConfigPath,
-			JSON.stringify({
-				disabledServers: ["disabledByName"],
-				mcpServers: {
-					absolute: { command: process.execPath, args: [fixture] },
-					pathCommand: { type: "stdio", command: path.basename(process.execPath), args: [fixture] },
-					zeroTools: {
-						type: "stdio",
-						command: process.execPath,
-						args: ["-e", syntheticZeroToolServerScript()],
-					},
-					httpAuth: {
-						type: "http",
-						url: httpServer.url.href,
-						headers: { "X-Synthetic-Canary": "GJC_MCP_HEADER_CANARY" },
-						auth: { type: "oauth", credentialId: "synthetic-mcp-oauth" },
-					},
-					doNotAutoload: {
-						type: "stdio",
-						command: "definitely-not-a-real-command",
-						autoload: false,
-					},
-					disabledByEnabled: {
-						type: "stdio",
-						command: "definitely-not-a-real-command",
-						enabled: false,
-					},
-					disabledByName: {
-						type: "stdio",
-						command: "definitely-not-a-real-command",
-					},
+		await writeMCPConfigFile(userConfigPath, {
+			disabledServers: ["disabledByName"],
+			mcpServers: {
+				absolute: { command: process.execPath, args: [fixture] },
+				pathCommand: { type: "stdio", command: path.basename(process.execPath), args: [fixture] },
+				stdioOauth: {
+					type: "stdio",
+					command: process.execPath,
+					args: [fixture],
+					auth: { type: "oauth", credentialId: "synthetic-mcp-oauth" },
+					oauth: { clientId: "synthetic-client" },
 				},
-			}),
-		);
+				zeroTools: {
+					type: "stdio",
+					command: process.execPath,
+					args: ["-e", syntheticZeroToolServerScript()],
+				},
+				httpAuth: {
+					type: "http",
+					url: httpServer.url.href,
+					headers: { "X-Synthetic-Canary": "GJC_MCP_HEADER_CANARY" },
+					auth: { type: "oauth", credentialId: "synthetic-mcp-oauth" },
+				},
+				doNotAutoload: {
+					type: "stdio",
+					command: "definitely-not-a-real-command",
+					autoload: false,
+				},
+				disabledByEnabled: {
+					type: "stdio",
+					command: "definitely-not-a-real-command",
+					enabled: false,
+				},
+				disabledByName: {
+					type: "stdio",
+					command: "definitely-not-a-real-command",
+				},
+			},
+		});
 
 		let manager: Awaited<ReturnType<typeof discoverAndLoadMCPTools>>["manager"] | undefined;
 		const loadOptions = {
@@ -153,10 +158,17 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 			manager = loaded.manager;
 
 			expect(loaded.errors).toEqual([]);
-			expect(loaded.connectedServers.sort()).toEqual(["absolute", "httpAuth", "pathCommand", "zeroTools"]);
+			expect(loaded.connectedServers.sort()).toEqual([
+				"absolute",
+				"httpAuth",
+				"pathCommand",
+				"stdioOauth",
+				"zeroTools",
+			]);
 			expect(loaded.tools.map(entry => entry.tool.name).sort()).toEqual([
 				"mcp__absolute_lookup",
 				"mcp__pathcommand_lookup",
+				"mcp__stdiooauth_lookup",
 			]);
 			expect(observedHeaders.length).toBeGreaterThanOrEqual(2);
 			for (const headers of observedHeaders) {
@@ -263,6 +275,7 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 		["unknown auth key", { type: "http", url: "http://127.0.0.1", auth: { type: "oauth", unexpected: true } }],
 		["unknown oauth key", { type: "http", url: "http://127.0.0.1", oauth: { unexpected: true } }],
 		["unknown root key", { type: "stdio", command: process.execPath }, { unexpected: true }],
+		["malformed schema reference", { type: "stdio", command: process.execPath }, { $schema: 1 }],
 	];
 
 	for (const [caseName, invalidConfig, rootFields] of invalidCatalogCases) {

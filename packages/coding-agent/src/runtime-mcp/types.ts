@@ -62,10 +62,9 @@ interface MCPServerConfigBase {
 	/** Whether this server is enabled (default: true) */
 	enabled?: boolean;
 	/**
-	 * Whether an explicit runtime MCP consumer should connect this server
-	 * automatically when that consumer starts (default: true). Normal standalone
-	 * `gjc`, `gjc --tmux`, and print-mode sessions do not consume `gjc mcp`
-	 * registrations today.
+	 * automatically when that consumer starts (default: true). Enabled user-global
+	 * registrations are consumed by newly started normal standalone `gjc`,
+	 * `gjc --tmux`, and print-mode sessions; project registrations remain storage-only.
 	 */
 	autoload?: boolean;
 	/** Connection timeout in milliseconds (default: 30000) */
