@@ -132,9 +132,27 @@ async function requireTrustedBun(context: BuildContext): Promise<string> {
 		mode: EXECUTABLE_MODE,
 	});
 }
+async function requireTrustedBuildBin(context: BuildContext, bun: string, home: string): Promise<string> {
+	await requireOwnedDirectory(home, DIRECTORY_MODE);
+	const directory = path.join(home, ".trusted-bin");
+	await fs.mkdir(directory, { recursive: true, mode: DIRECTORY_MODE });
+	await requireOwnedDirectory(directory, DIRECTORY_MODE);
+	const stagedBun = path.join(directory, "bun");
+	const stat = await fs.lstat(stagedBun).catch(() => null);
+	if (!stat) {
+		await fs.copyFile(bun, stagedBun);
+		await fs.chmod(stagedBun, EXECUTABLE_MODE);
+	}
+	await requireCanonicalFile(stagedBun, context.bunSha256, {
+		root: directory,
+		mode: EXECUTABLE_MODE,
+	});
+	return directory;
+}
 
 async function runBuild(context: BuildContext, command: readonly string[], cwd: string, home: string): Promise<void> {
 	const bun = await requireTrustedBun(context);
+	const trustedBin = await requireTrustedBuildBin(context, bun, home);
 	const child = Bun.spawn([bun, ...command], {
 		cwd,
 		env: {
@@ -143,7 +161,7 @@ async function runBuild(context: BuildContext, command: readonly string[], cwd: 
 			XDG_DATA_HOME: path.join(home, "data"),
 			XDG_STATE_HOME: path.join(home, "state"),
 			XDG_CACHE_HOME: path.join(home, "cache"),
-			PATH: "/usr/bin:/bin",
+			PATH: `${trustedBin}:/usr/bin:/bin`,
 			LANG: "C",
 			LC_ALL: "C",
 			CI: "1",
