@@ -323,9 +323,9 @@ export async function buildCandidateRelease(context: BuildContext, source: Relea
 	try {
 		await runBuild(context, ["install", "--frozen-lockfile"], source.worktree, home);
 		await seedBaselineNativeAddon(context, source);
-		await runBuild(context, ["--cwd", "packages/coding-agent", "run", "check:types"], source.worktree, home);
+		await runBuild(context, ["--cwd=packages/coding-agent", "run", "check:types"], source.worktree, home);
 		await runBuild(context, ["test", ...RUNTIME_CONTRACT_TESTS], source.worktree, home);
-		await runBuild(context, ["--cwd", "packages/coding-agent", "run", "build"], source.worktree, home);
+		await runBuild(context, ["--cwd=packages/coding-agent", "run", "build"], source.worktree, home);
 		const binary = path.join(source.worktree, "packages/coding-agent/dist/gjc");
 		await fs.chmod(binary, EXECUTABLE_MODE);
 		const binarySha256 = await hashFile(binary);
@@ -406,8 +406,8 @@ export async function buildBaselineFallbackRelease(context: BuildContext, source
 	try {
 		await runBuild(context, ["install", "--frozen-lockfile"], source.worktree, home);
 		await seedBaselineNativeAddon(context, source);
-		await runBuild(context, ["--cwd", "packages/coding-agent", "run", "check:types"], source.worktree, home);
-		await runBuild(context, ["--cwd", "packages/coding-agent", "run", "build"], source.worktree, home);
+		await runBuild(context, ["--cwd=packages/coding-agent", "run", "check:types"], source.worktree, home);
+		await runBuild(context, ["--cwd=packages/coding-agent", "run", "build"], source.worktree, home);
 		await verifyPinnedFallbackSource(context.paths, context.fallbackSha256);
 		const binary = path.join(source.worktree, "packages/coding-agent/dist/gjc");
 		await fs.chmod(binary, EXECUTABLE_MODE);

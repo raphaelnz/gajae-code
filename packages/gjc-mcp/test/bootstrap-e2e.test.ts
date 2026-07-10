@@ -113,7 +113,7 @@ async function isolatedPaths(): Promise<{ paths: UpdaterPaths; fallbackTarget: s
 	});
 	await fs.writeFile(
 		path.join(bunBin, "bun"),
-		'#!/bin/sh\ncase "$*" in\n  *"run build"*) mkdir -p packages/coding-agent/dist; cp packages/coding-agent/bin/gjc.js packages/coding-agent/dist/gjc; chmod 755 packages/coding-agent/dist/gjc ;;\nesac\nexit 0\n',
+		'#!/bin/sh\nif [ "$1" = "--cwd=packages/coding-agent" ] && [ "$2" = run ] && [ "$3" = build ]; then\n  mkdir -p packages/coding-agent/dist\n  cp packages/coding-agent/bin/gjc.js packages/coding-agent/dist/gjc\n  chmod 755 packages/coding-agent/dist/gjc\n  exit 0\nfi\ncase "$*" in *"run build"*) exit 3 ;; esac\nexit 0\n',
 		{ mode: 0o755 },
 	);
 	await fs.chmod(path.join(bunBin, "bun"), 0o755);
