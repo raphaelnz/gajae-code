@@ -99,6 +99,16 @@
         "@gajae-code/coding-agent": "catalog:",
       },
     },
+    "packages/gjc-mcp": {
+      "name": "@gajae-code/gjc-mcp",
+      "version": "0.9.6",
+      "bin": {
+        "gjc-mcp": "./dist/gjc-mcp",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/natives": {
       "name": "@gajae-code/natives",
       "version": "0.9.6",
@@ -438,6 +448,8 @@
     "@gajae-code/bridge-client": ["@gajae-code/bridge-client@workspace:packages/bridge-client"],
 
     "@gajae-code/coding-agent": ["@gajae-code/coding-agent@workspace:packages/coding-agent"],
+
+    "@gajae-code/gjc-mcp": ["@gajae-code/gjc-mcp@workspace:packages/gjc-mcp"],
 
     "@gajae-code/natives": ["@gajae-code/natives@workspace:packages/natives"],
 
