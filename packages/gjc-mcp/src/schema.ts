@@ -42,6 +42,7 @@ export const RUNTIME_PATCH_PATHS = [
 	"packages/coding-agent/src/discovery/builtin.ts",
 	"packages/coding-agent/src/main.ts",
 	"packages/coding-agent/src/runtime-mcp/config.ts",
+	"packages/coding-agent/src/runtime-mcp/config-writer.ts",
 	"packages/coding-agent/src/runtime-mcp/loader.ts",
 	"packages/coding-agent/src/runtime-mcp/manager.ts",
 	"packages/coding-agent/src/runtime-mcp/types.ts",
@@ -63,6 +64,7 @@ export const RUNTIME_PATCH_PATHS = [
 	"packages/coding-agent/test/sdk-session-isolation.test.ts",
 	"packages/coding-agent/test/standalone-mcp-auth-e2e.test.ts",
 	"packages/coding-agent/test/standalone-mcp-mode-isolation.test.ts",
+	"packages/coding-agent/test/runtime-mcp/config-writer.test.ts",
 	"packages/coding-agent/test/runtime-mcp/transport-lifecycle.test.ts",
 ] as const;
 

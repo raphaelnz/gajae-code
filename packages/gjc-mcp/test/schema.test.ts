@@ -22,7 +22,7 @@ const H40_A = "a".repeat(40);
 const H40_B = "b".repeat(40);
 const H64_A = "a".repeat(64);
 const NOW = "2026-07-10T00:00:00Z";
-const RUNTIME_POLICY_SHA256 = "de88c6029767f15bb23246c044c3460861df1be3b0a4d7f2e236aa0764d19d52";
+const RUNTIME_POLICY_SHA256 = "06b36379cdd81ad725451717051bf497e3376d7ebe580d23b3040f0c806d67e0";
 const UPDATER_POLICY_SHA256 = "94b553b6f37e10c0f64e171bd97e542afdff5a48b6100ca33218670684e64ba5";
 
 function config(): ConfigV1 {
