@@ -31,6 +31,41 @@ function rpcResult(body: JsonRpcMessage): Record<string, unknown> {
 	return { jsonrpc: "2.0", id, result: {} };
 }
 
+function sseRpcResponse(body: JsonRpcMessage): Response {
+	let response = rpcResult(body);
+	if ("method" in body && body.method === "tools/list") {
+		response = {
+			jsonrpc: "2.0",
+			id: "id" in body ? body.id : 0,
+			result: {
+				tools: [
+					{
+						name: "lookup",
+						description: "Return a synthetic SSE result",
+						inputSchema: { type: "object", properties: {}, additionalProperties: false },
+					},
+				],
+			},
+		};
+	} else if ("method" in body && body.method === "tools/call") {
+		response =
+			body.params?.name === "lookup"
+				? {
+						jsonrpc: "2.0",
+						id: "id" in body ? body.id : 0,
+						result: { content: [{ type: "text", text: "sse=synthetic-sse-result" }] },
+					}
+				: {
+						jsonrpc: "2.0",
+						id: "id" in body ? body.id : 0,
+						error: { code: -32602, message: "Unknown synthetic tool" },
+					};
+	}
+	return new Response(`data: ${JSON.stringify(response)}\n\n`, {
+		headers: { "Content-Type": "text/event-stream" },
+	});
+}
+
 describe("standalone user-global MCP synthetic auth and transport coverage", () => {
 	const originalAgentDir = getAgentDir();
 	const originalAgentDirEnv = process.env.GJC_CODING_AGENT_DIR;
@@ -66,7 +101,7 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 		await fs.rm(root, { recursive: true, force: true });
 	});
 
-	it("loads only autoloadable user servers and resolves synthetic stdio, HTTP, and OAuth canaries", async () => {
+	it("loads only autoloadable user servers and resolves synthetic stdio, HTTP, SSE, and OAuth canaries", async () => {
 		const cwd = path.join(root, "project");
 		await fs.mkdir(cwd, { recursive: true });
 		const fixture = path.join(import.meta.dir, "fixtures/gjc-plugins/valid-mcp-bundle/mcp/server.ts");
@@ -86,6 +121,19 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 				});
 				const body = (await request.json()) as JsonRpcMessage;
 				return Response.json(rpcResult(body));
+			},
+		});
+		const observedSseRequests: Array<{ method: string; authorization: string | null; canary: string | null }> = [];
+		const sseServer = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				observedSseRequests.push({
+					method: request.method,
+					authorization: request.headers.get("authorization"),
+					canary: request.headers.get("x-synthetic-canary"),
+				});
+				if (request.method === "GET") return new Response(null, { status: 405 });
+				return sseRpcResponse((await request.json()) as JsonRpcMessage);
 			},
 		});
 		const authStorage = await createSyntheticAuthStorage(root);
@@ -124,6 +172,12 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 				httpAuth: {
 					type: "http",
 					url: httpServer.url.href,
+					headers: { "X-Synthetic-Canary": "GJC_MCP_HEADER_CANARY" },
+					auth: { type: "oauth", credentialId: "synthetic-mcp-oauth" },
+				},
+				sseAuth: {
+					type: "sse",
+					url: sseServer.url.href,
 					headers: { "X-Synthetic-Canary": "GJC_MCP_HEADER_CANARY" },
 					auth: { type: "oauth", credentialId: "synthetic-mcp-oauth" },
 				},
@@ -166,12 +220,14 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 				"absolute",
 				"httpAuth",
 				"pathCommand",
+				"sseAuth",
 				"stdioOauth",
 				"zeroTools",
 			]);
 			expect(loaded.tools.map(entry => entry.tool.name).sort()).toEqual([
 				"mcp__absolute_lookup",
 				"mcp__pathcommand_lookup",
+				"mcp__sseauth_lookup",
 				"mcp__stdiooauth_lookup",
 			]);
 			expect(observedHeaders.length).toBeGreaterThanOrEqual(2);
@@ -185,6 +241,17 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 			const stdioOauthTool = loaded.tools.find(entry => entry.tool.name === "mcp__stdiooauth_lookup")?.tool;
 			const stdioOauthResult = await stdioOauthTool?.execute("synthetic-oauth-call", {}, undefined, {} as never);
 			expect(stdioOauthResult?.content).toEqual([{ type: "text", text: "env=synthetic-access-token" }]);
+			const sseAuthTool = loaded.tools.find(entry => entry.tool.name === "mcp__sseauth_lookup")?.tool;
+			expect(sseAuthTool?.mcpToolName).toBe("lookup");
+			const sseAuthResult = await sseAuthTool?.execute("synthetic-sse-call", {}, undefined, {} as never);
+			expect(sseAuthResult?.content).toEqual([{ type: "text", text: "sse=synthetic-sse-result" }]);
+			expect(observedSseRequests.map(request => request.method)).toEqual(["POST", "GET", "POST", "POST", "POST"]);
+			for (const request of observedSseRequests) {
+				expect({ authorization: request.authorization, canary: request.canary }).toEqual({
+					authorization: "Bearer synthetic-access-token",
+					canary: "resolved-header-canary",
+				});
+			}
 			const acceptedTool = loaded.tools.find(entry => entry.tool.name === "mcp__absolute_lookup")?.tool;
 			expect(acceptedTool).toBeDefined();
 			await fs.writeFile(
@@ -210,6 +277,7 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 			await manager?.disconnectAll();
 			authStorage.close();
 			await httpServer.stop(true);
+			await sseServer.stop(true);
 		}
 	});
 	it("fails closed on malformed exact-source JSON without surfacing its contents", async () => {
