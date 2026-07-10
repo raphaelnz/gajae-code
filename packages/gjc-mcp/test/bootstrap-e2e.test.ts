@@ -113,7 +113,7 @@ async function isolatedPaths(): Promise<{ paths: UpdaterPaths; fallbackTarget: s
 	});
 	await fs.writeFile(
 		path.join(bunBin, "bun"),
-		'#!/bin/sh\nif [ "$PATH" != "$HOME/.trusted-bin:/usr/bin:/bin" ] || [ "$(command -v bun)" != "$HOME/.trusted-bin/bun" ] || ! cmp -s "$0" "$HOME/.trusted-bin/bun"; then\n  exit 4\nfi\nif [ "$1" = "--cwd=packages/coding-agent" ] && [ "$2" = run ] && [ "$3" = build ]; then\n  mkdir -p packages/coding-agent/dist\n  cp packages/coding-agent/bin/gjc.js packages/coding-agent/dist/gjc\n  chmod 755 packages/coding-agent/dist/gjc\n  exit 0\nfi\ncase "$*" in *"run build"*) exit 3 ;; esac\nexit 0\n',
+		'#!/bin/sh\nif [ "$1" = "--gjc-mcp-staged-check" ]; then\n  mode="$(stat -f %Lp "$0" 2>/dev/null || stat -c %a "$0" 2>/dev/null)"\n  if [ "$0" != "$HOME/.trusted-bin/bun" ] || [ "$mode" != 755 ]; then\n    exit 5\n  fi\n  printf "%s\\n" "$0" >> .nested-bun-marker\n  exit 0\nfi\nif [ -f .fail-build ]; then\n  exit 9\nfi\nif [ "$PATH" != "$HOME/.trusted-bin:/usr/bin:/bin" ] || [ "$(command -v bun)" != "$HOME/.trusted-bin/bun" ] || ! cmp -s "$0" "$HOME/.trusted-bin/bun" || ! bun --gjc-mcp-staged-check; then\n  exit 4\nfi\nif [ "$1" = "--cwd=packages/coding-agent" ] && [ "$2" = run ] && [ "$3" = build ]; then\n  mkdir -p packages/coding-agent/dist\n  cp packages/coding-agent/bin/gjc.js packages/coding-agent/dist/gjc\n  chmod 755 packages/coding-agent/dist/gjc\n  exit 0\nfi\ncase "$*" in *"run build"*) exit 3 ;; esac\nexit 0\n',
 		{ mode: 0o755 },
 	);
 	await fs.chmod(path.join(bunBin, "bun"), 0o755);
@@ -229,7 +229,8 @@ describe("isolated bootstrap through production release and transaction seams", 
 		const { paths, fallbackTarget } = await isolatedPaths();
 		const sourceLink = await fs.readlink(paths.bunFallbackPath);
 		const sourceBytes = await fs.readFile(fallbackTarget);
-		const release = await publishFallbackRelease(await fallbackContext(paths, fallbackTarget));
+		const source = await baselineSource(paths);
+		const release = await buildBaselineFallbackRelease(await fallbackContext(paths, fallbackTarget), source);
 		const verified = await verifyRelease(paths, release.releaseId);
 		const artifact = path.join(paths.releasesRoot, release.releaseId, verified.artifact.path);
 		const stat = await fs.lstat(artifact);
@@ -242,6 +243,27 @@ describe("isolated bootstrap through production release and transaction seams", 
 		expect(await fs.readlink(paths.bunFallbackPath)).toBe(sourceLink);
 		expect(await fs.readFile(fallbackTarget)).toEqual(sourceBytes);
 		expect(digest(await fs.readFile(artifact))).toBe(verified.artifact.sha256);
+		const stagedBuns = (await fs.readFile(path.join(source.worktree, ".nested-bun-marker"), "utf8"))
+			.trim()
+			.split("\n");
+		expect(stagedBuns).toHaveLength(3);
+		expect(new Set(stagedBuns).size).toBe(1);
+		expect(stagedBuns[0]).toContain(`${path.sep}.fallback-build-home-`);
+		expect((await fs.readdir(paths.worktreesRoot)).filter(name => name.startsWith(".fallback-build-home-"))).toEqual(
+			[],
+		);
+	});
+	test("removes the private build HOME when a build subprocess fails", async () => {
+		const { paths, fallbackTarget } = await isolatedPaths();
+		const source = await baselineSource(paths);
+		await fs.writeFile(path.join(source.worktree, ".fail-build"), "fail\n", { mode: 0o600 });
+
+		await expect(
+			buildBaselineFallbackRelease(await fallbackContext(paths, fallbackTarget), source),
+		).rejects.toMatchObject({ code: "GJC_MCP_E_BUILD" });
+		expect((await fs.readdir(paths.worktreesRoot)).filter(name => name.startsWith(".fallback-build-home-"))).toEqual(
+			[],
+		);
 	});
 	test("rejects changed, moved, symlinked, or wrong-mode dependencies and a non-private managed root", async () => {
 		const first = await isolatedPaths();

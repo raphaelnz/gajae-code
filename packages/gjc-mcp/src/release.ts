@@ -151,6 +151,7 @@ async function requireTrustedBuildBin(context: BuildContext, bun: string, home: 
 }
 
 async function runBuild(context: BuildContext, command: readonly string[], cwd: string, home: string): Promise<void> {
+	if (process.platform === "win32") throw new ReleaseError("GJC_MCP_E_BUILD");
 	const bun = await requireTrustedBun(context);
 	const trustedBin = await requireTrustedBuildBin(context, bun, home);
 	const child = Bun.spawn([bun, ...command], {
@@ -161,7 +162,7 @@ async function runBuild(context: BuildContext, command: readonly string[], cwd: 
 			XDG_DATA_HOME: path.join(home, "data"),
 			XDG_STATE_HOME: path.join(home, "state"),
 			XDG_CACHE_HOME: path.join(home, "cache"),
-			PATH: `${trustedBin}:/usr/bin:/bin`,
+			PATH: [trustedBin, "/usr/bin", "/bin"].join(path.delimiter),
 			LANG: "C",
 			LC_ALL: "C",
 			CI: "1",
