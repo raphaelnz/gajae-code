@@ -24,8 +24,8 @@ import {
 } from "./paths";
 import {
 	type BuildContext,
+	buildBaselineFallbackRelease,
 	buildCandidateRelease,
-	publishFallbackRelease,
 	type ReleaseSource,
 	verifyPinnedFallbackSource,
 	verifyRelease,
@@ -297,10 +297,23 @@ async function defaultPrepareBootstrap(
 		throw new EngineError("GJC_MCP_E_TAG_RETARGET");
 	}
 	const worktree = path.join(paths.worktreesRoot, `bootstrap-${crypto.randomUUID()}`);
+	const fallbackWorktree = path.join(paths.worktreesRoot, `bootstrap-fallback-${crypto.randomUUID()}`);
 	try {
-		const source = await sourceForCandidate(engine, candidate, worktree);
 		const context = await buildContext(engine);
-		const fallback = await publishFallbackRelease(context);
+		await materializeWorktree(paths.sourceRoot, fallbackWorktree, candidate.identity.commit, engine.environment);
+		const fallbackSource: ReleaseSource = {
+			worktree: fallbackWorktree,
+			kind: "official",
+			version: candidate.version,
+			upstreamTag: candidate.name,
+			identity: candidate.identity,
+			patchBase: null,
+			patchTip: null,
+			runtimePolicySha256: null,
+			tree: await resolveCommitTree(paths.sourceRoot, candidate.identity.commit, engine.environment),
+		};
+		const fallback = await buildBaselineFallbackRelease(context, fallbackSource);
+		const source = await sourceForCandidate(engine, candidate, worktree);
 		const release = await buildCandidateRelease(context, source);
 		const launcherBytes = new Uint8Array(await Bun.file(paths.updaterPath).arrayBuffer());
 		const state: StateV1 = {
@@ -320,6 +333,7 @@ async function defaultPrepareBootstrap(
 		return { fallback, candidate: release, state, launcherBytes };
 	} finally {
 		await removeWorktree(paths.sourceRoot, worktree, engine.environment);
+		await removeWorktree(paths.sourceRoot, fallbackWorktree, engine.environment);
 	}
 }
 

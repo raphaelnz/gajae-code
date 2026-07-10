@@ -100,11 +100,61 @@ async function safeRelease(lockPath: string, token: string): Promise<void> {
 	}
 }
 
+type FileIdentity = Pick<Awaited<ReturnType<typeof fs.lstat>>, "dev" | "ino">;
+
+function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
+	return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function unlinkIfIdentity(file: string, expected: FileIdentity): Promise<boolean> {
+	try {
+		const current = await fs.lstat(file);
+		if (!sameIdentity(current, expected)) return false;
+		await fs.unlink(file);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function claimStaleGuard(
+	guardPath: string,
+): Promise<{ identity: FileIdentity; release: () => Promise<void> } | null> {
+	const claimPath = `${guardPath}.claim`;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			await fs.link(guardPath, claimPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
+			if ((await inspectLock(claimPath)).state !== "stale") return null;
+			const abandoned = await fs.lstat(claimPath).catch(() => null);
+			if (!abandoned || !(await unlinkIfIdentity(claimPath, abandoned))) return null;
+			continue;
+		}
+		const [guard, claim] = await Promise.all([
+			fs.lstat(guardPath).catch(() => null),
+			fs.lstat(claimPath).catch(() => null),
+		]);
+		if (!guard || !claim || !sameIdentity(guard, claim) || (await inspectLock(claimPath)).state !== "stale") {
+			if (claim) await unlinkIfIdentity(claimPath, claim);
+			return null;
+		}
+		return {
+			identity: claim,
+			release: async () => {
+				await unlinkIfIdentity(claimPath, claim);
+			},
+		};
+	}
+	return null;
+}
+
 async function acquireTakeoverGuard(lockPath: string): Promise<(() => Promise<void>) | null> {
 	const uid = process.getuid?.();
 	if (uid === undefined) return null;
 	const guardPath = `${lockPath}.takeover`;
-	for (let attempt = 0; attempt < 2; attempt++) {
+	let releaseClaim: (() => Promise<void>) | null = null;
+	for (let attempt = 0; attempt < 3; attempt++) {
 		const token = crypto.randomBytes(16).toString("hex");
 		const record: LockRecordV1 = {
 			schema: 1,
@@ -121,18 +171,22 @@ async function acquireTakeoverGuard(lockPath: string): Promise<(() => Promise<vo
 			} finally {
 				await handle.close();
 			}
+			await releaseClaim?.();
 			return () => safeRelease(guardPath, token);
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") return null;
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") break;
 			const inspection = await inspectLock(guardPath);
-			if (inspection.state !== "stale") return null;
-			try {
-				await fs.unlink(guardPath);
-			} catch (unlinkError) {
-				if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") return null;
+			if (inspection.state !== "stale" || releaseClaim) break;
+			const claim = await claimStaleGuard(guardPath);
+			if (!claim) break;
+			if (!(await unlinkIfIdentity(guardPath, claim.identity))) {
+				await claim.release();
+				break;
 			}
+			releaseClaim = claim.release;
 		}
 	}
+	await releaseClaim?.();
 	return null;
 }
 

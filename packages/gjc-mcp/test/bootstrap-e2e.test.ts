@@ -5,13 +5,21 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { runCli } from "../src/main";
 import { resolveUpdaterPaths, type UpdaterPaths } from "../src/paths";
-import { publishFallbackRelease, seedBaselineNativeAddon, verifyRelease, verifyReleaseBinary } from "../src/release";
+import {
+	type BuildContext,
+	buildBaselineFallbackRelease,
+	type ReleaseSource,
+	seedBaselineNativeAddon,
+	verifyRelease,
+	verifyReleaseBinary,
+} from "../src/release";
 import { type ManifestV1, type StateV1, serializeManifestV1 } from "../src/schema";
 import { bootstrap, type TransactionPhase } from "../src/transaction";
 
 const roots: string[] = [];
 const ZERO = "0".repeat(64);
 const BASELINE_COMMIT = "aedd0df99e7c9dff420b50f7ff47bd6645627bdd";
+const BASELINE_TREE = "25df3453b59976ac793350ebe9dce51edd9b26cc";
 
 function digest(value: string | Uint8Array): string {
 	return crypto.createHash("sha256").update(value).digest("hex");
@@ -19,6 +27,32 @@ function digest(value: string | Uint8Array): string {
 
 function gjcScript(version: string): string {
 	return `#!/bin/sh\ncase "$1" in\n  --version) echo 'gjc/${version}' ;;\n  --smoke-test) exit 0 ;;\n  *) exit 0 ;;\nesac\n`;
+}
+function nativePlatformTag(): string {
+	const platform =
+		process.platform === "darwin"
+			? "darwin"
+			: process.platform === "linux"
+				? "linux"
+				: process.platform === "win32"
+					? "win32"
+					: "unsupported";
+	return `${platform}-${process.arch}`;
+}
+
+function baselineAddonPath(paths: UpdaterPaths): string {
+	const platformTag = nativePlatformTag();
+	return path.join(
+		paths.home,
+		".bun",
+		"install",
+		"global",
+		"node_modules",
+		"@gajae-code",
+		`natives-${platformTag}`,
+		"native",
+		`pi_natives.${platformTag}.node`,
+	);
 }
 
 async function isolatedPaths(): Promise<{ paths: UpdaterPaths; fallbackTarget: string }> {
@@ -46,9 +80,40 @@ async function isolatedPaths(): Promise<{ paths: UpdaterPaths; fallbackTarget: s
 	await fs.mkdir(bunBin, { recursive: true, mode: 0o700 });
 	await fs.writeFile(fallbackTarget, gjcScript("0.9.6"), { mode: 0o755 });
 	await fs.chmod(fallbackTarget, 0o755);
+	const packageRoot = path.dirname(path.dirname(fallbackTarget));
+	const scopeRoot = path.dirname(packageRoot);
+	for (const source of [
+		path.join(packageRoot, "src", "cli.ts"),
+		path.join(scopeRoot, "stats", "src", "sync-worker.ts"),
+		path.join(packageRoot, "src", "tools", "browser", "tab-worker-entry.ts"),
+		path.join(packageRoot, "src", "eval", "js", "worker-entry.ts"),
+		path.join(scopeRoot, "natives", "native", "index.js"),
+		path.join(scopeRoot, "natives", "native", "loader-state.js"),
+		path.join(packageRoot, "src", "notifications", "telegram-daemon-cli.ts"),
+	]) {
+		await fs.mkdir(path.dirname(source), { recursive: true, mode: 0o700 });
+		await fs.writeFile(source, "", { mode: 0o600 });
+	}
+	await fs.writeFile(
+		path.join(packageRoot, "package.json"),
+		'{"name":"@gajae-code/coding-agent","version":"0.9.6","type":"module","exports":{"./cli":"./src/cli.ts"}}\n',
+		{ mode: 0o600 },
+	);
+	await fs.writeFile(
+		path.join(scopeRoot, "natives", "package.json"),
+		'{"name":"@gajae-code/natives","version":"0.9.6","type":"module"}\n',
+		{ mode: 0o600 },
+	);
+	const installedAddon = baselineAddonPath(paths);
+	await fs.mkdir(path.dirname(installedAddon), { recursive: true, mode: 0o700 });
+	await fs.writeFile(installedAddon, "synthetic-native-addon", { mode: 0o644 });
+	await fs.chmod(installedAddon, 0o644);
+	await fs.writeFile(path.join(path.dirname(path.dirname(installedAddon)), "package.json"), '{"version":"0.9.6"}\n', {
+		mode: 0o600,
+	});
 	await fs.writeFile(
 		path.join(bunBin, "bun"),
-		'#!/bin/sh\nif [ "$1" = build ] && [ "$2" = --compile ] && [ "$4" = --outfile ]; then cp "$3" "$5" && chmod 755 "$5"; exit $?; fi\nexec "$@"\n',
+		'#!/bin/sh\ncase "$*" in\n  *"run build"*) mkdir -p packages/coding-agent/dist; cp packages/coding-agent/bin/gjc.js packages/coding-agent/dist/gjc; chmod 755 packages/coding-agent/dist/gjc ;;\nesac\nexit 0\n',
 		{ mode: 0o755 },
 	);
 	await fs.chmod(path.join(bunBin, "bun"), 0o755);
@@ -57,15 +122,42 @@ async function isolatedPaths(): Promise<{ paths: UpdaterPaths; fallbackTarget: s
 }
 function fallbackContext(paths: UpdaterPaths, fallbackTarget: string) {
 	const bunPath = path.join(path.dirname(paths.bunFallbackPath), "bun");
-	return Promise.all([fs.readFile(bunPath), fs.readFile(fallbackTarget)]).then(([bun, fallback]) => ({
-		paths,
-		bunPath,
-		bunVersion: "1.2.0",
-		bunSha256: digest(bun),
-		fallbackSha256: digest(fallback),
-		baselineNativeAddonSha256: ZERO,
-		trustedSource: true,
-	}));
+	const addonPath = baselineAddonPath(paths);
+	return Promise.all([fs.readFile(bunPath), fs.readFile(fallbackTarget), fs.readFile(addonPath)]).then(
+		([bun, fallback, addon]) => ({
+			paths,
+			bunPath,
+			bunVersion: "1.2.0",
+			bunSha256: digest(bun),
+			fallbackSha256: digest(fallback),
+			baselineNativeAddonSha256: digest(addon),
+			trustedSource: true,
+		}),
+	);
+}
+async function baselineSource(paths: UpdaterPaths): Promise<ReleaseSource> {
+	const worktree = path.join(paths.home, `baseline-worktree-${crypto.randomUUID()}`);
+	await fs.mkdir(path.join(worktree, "packages", "coding-agent", "bin"), { recursive: true, mode: 0o700 });
+	await fs.mkdir(path.join(worktree, "packages", "natives", "native"), { recursive: true, mode: 0o700 });
+	await fs.writeFile(path.join(worktree, "packages", "coding-agent", "bin", "gjc.js"), gjcScript("0.9.6"), {
+		mode: 0o755,
+	});
+	await fs.writeFile(path.join(worktree, "bun.lock"), "synthetic-lock\n", { mode: 0o600 });
+	return {
+		worktree,
+		kind: "official",
+		version: "0.9.6",
+		upstreamTag: "v0.9.6",
+		identity: { tagObject: null, commit: BASELINE_COMMIT },
+		patchBase: null,
+		patchTip: null,
+		runtimePolicySha256: null,
+		tree: BASELINE_TREE,
+	};
+}
+
+async function publishFallbackRelease(context: BuildContext): Promise<ManifestV1> {
+	return buildBaselineFallbackRelease(context, await baselineSource(context.paths));
 }
 
 async function makeRelease(paths: UpdaterPaths, version: string, kind: "official" | "patched"): Promise<ManifestV1> {
@@ -150,46 +242,6 @@ describe("isolated bootstrap through production release and transaction seams", 
 		expect(await fs.readlink(paths.bunFallbackPath)).toBe(sourceLink);
 		expect(await fs.readFile(fallbackTarget)).toEqual(sourceBytes);
 		expect(digest(await fs.readFile(artifact))).toBe(verified.artifact.sha256);
-	});
-	test("compiles the pinned fallback from its package self-reference with Bun autoinstall disabled", async () => {
-		const { paths, fallbackTarget } = await isolatedPaths();
-		const packageRoot = path.dirname(path.dirname(fallbackTarget));
-		const bunPath = path.join(path.dirname(paths.bunFallbackPath), "bun");
-		const cliPath = path.join(packageRoot, "dist", "cli.js");
-		await fs.rm(bunPath);
-		if (((await fs.lstat(process.execPath)).mode & 0o777) === 0o755) {
-			try {
-				await fs.link(process.execPath, bunPath);
-			} catch {
-				await fs.copyFile(process.execPath, bunPath);
-			}
-		} else {
-			await fs.copyFile(process.execPath, bunPath);
-			await fs.chmod(bunPath, 0o755);
-		}
-		await fs.mkdir(path.dirname(cliPath), { recursive: true, mode: 0o700 });
-		await fs.writeFile(
-			path.join(packageRoot, "package.json"),
-			JSON.stringify({
-				name: "@gajae-code/coding-agent",
-				type: "module",
-				exports: { "./cli": "./dist/cli.js" },
-			}),
-			{ mode: 0o600 },
-		);
-		await fs.writeFile(fallbackTarget, '#!/usr/bin/env bun\nimport "@gajae-code/coding-agent/cli";\n', {
-			mode: 0o755,
-		});
-		await fs.chmod(fallbackTarget, 0o755);
-		await fs.writeFile(
-			cliPath,
-			'if (process.argv[2] === "--version") console.log("gjc/0.9.6");\nif (process.argv[2] === "--smoke-test") console.log("smoke-test: ok");\n',
-			{ mode: 0o600 },
-		);
-
-		const release = await publishFallbackRelease(await fallbackContext(paths, fallbackTarget));
-		expect(release.kind).toBe("bun-fallback");
-		expect(await verifyReleaseBinary(paths, release)).toBe(true);
 	});
 	test("rejects changed, moved, symlinked, or wrong-mode dependencies and a non-private managed root", async () => {
 		const first = await isolatedPaths();

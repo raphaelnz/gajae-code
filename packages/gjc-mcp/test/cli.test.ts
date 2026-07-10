@@ -336,6 +336,38 @@ describe("public updater validation, status, and locking", () => {
 		expect(await Bun.file(`${paths.lockPath}.takeover`).exists()).toBe(false);
 		expect(await Bun.file(paths.lockPath).exists()).toBe(false);
 	});
+	test("serializes concurrent recovery of both an abandoned guard and stale primary lock", async () => {
+		const environment = await syntheticEnvironment();
+		const paths = resolveUpdaterPaths(environment);
+		await ensureManagedRoots(paths, true);
+		await fs.writeFile(paths.lockPath, lockRecord(2_147_483_647), { mode: 0o600 });
+		await fs.writeFile(`${paths.lockPath}.takeover`, lockRecord(2_147_483_647), { mode: 0o600 });
+
+		const results = await Promise.all([acquireLock(paths.lockPath), acquireLock(paths.lockPath)]);
+		const acquired = results.filter(result => result.ok);
+		expect(acquired).toHaveLength(1);
+		expect(results.filter(result => !result.ok)).toHaveLength(1);
+		if (acquired[0]?.ok) await acquired[0].lock.release();
+		expect(await Bun.file(`${paths.lockPath}.takeover`).exists()).toBe(false);
+		expect(await Bun.file(`${paths.lockPath}.takeover.claim`).exists()).toBe(false);
+		expect(await Bun.file(paths.lockPath).exists()).toBe(false);
+	});
+
+	test("recovers an abandoned identity claim before taking over the dead guard", async () => {
+		const environment = await syntheticEnvironment();
+		const paths = resolveUpdaterPaths(environment);
+		await ensureManagedRoots(paths, true);
+		const guardPath = `${paths.lockPath}.takeover`;
+		await fs.writeFile(guardPath, lockRecord(2_147_483_647), { mode: 0o600 });
+		await fs.link(guardPath, `${guardPath}.claim`);
+
+		const acquired = await acquireLock(paths.lockPath);
+		expect(acquired.ok).toBe(true);
+		if (acquired.ok) await acquired.lock.release();
+		expect(await Bun.file(guardPath).exists()).toBe(false);
+		expect(await Bun.file(`${guardPath}.claim`).exists()).toBe(false);
+		expect(await Bun.file(paths.lockPath).exists()).toBe(false);
+	});
 });
 describe("updater install snapshot classifications", () => {
 	test("rejects a failing updater candidate before installed target or sidecar bytes can change", async () => {

@@ -384,50 +384,64 @@ export async function verifyPinnedFallbackSource(paths: UpdaterPaths, expectedSh
 	return fallback;
 }
 
-export async function publishFallbackRelease(context: BuildContext): Promise<ManifestV1> {
+export async function buildBaselineFallbackRelease(context: BuildContext, source: ReleaseSource): Promise<ManifestV1> {
+	if (
+		!context.trustedSource ||
+		!path.isAbsolute(source.worktree) ||
+		source.kind !== "official" ||
+		source.version !== "0.9.6" ||
+		source.upstreamTag !== "v0.9.6" ||
+		source.identity.tagObject !== null ||
+		source.identity.commit !== "aedd0df99e7c9dff420b50f7ff47bd6645627bdd" ||
+		source.patchBase !== null ||
+		source.patchTip !== null ||
+		source.runtimePolicySha256 !== null ||
+		source.tree !== BASELINE_TREE
+	)
+		throw new ReleaseError("GJC_MCP_E_VERIFY");
+	await verifyPinnedFallbackSource(context.paths, context.fallbackSha256);
 	await requireManagedReleaseRoot(context.paths, true);
-	const fallback = await verifyPinnedFallbackSource(context.paths, context.fallbackSha256);
-	const home = path.join(context.paths.worktreesRoot, `.fallback-home-${crypto.randomUUID()}`);
-	const compiled = path.join(context.paths.cacheRoot, `.fallback-${crypto.randomUUID()}`);
-	const packageRoot = path.dirname(path.dirname(fallback));
+	const home = path.join(context.paths.worktreesRoot, `.fallback-build-home-${crypto.randomUUID()}`);
 	await fs.mkdir(home, { recursive: true, mode: DIRECTORY_MODE });
-	await fs.mkdir(context.paths.cacheRoot, { recursive: true, mode: DIRECTORY_MODE });
 	try {
-		await runBuild(context, ["build", "--compile", fallback, "--outfile", compiled], packageRoot, home);
+		await runBuild(context, ["install", "--frozen-lockfile"], source.worktree, home);
+		await seedBaselineNativeAddon(context, source);
+		await runBuild(context, ["--cwd", "packages/coding-agent", "run", "check:types"], source.worktree, home);
+		await runBuild(context, ["--cwd", "packages/coding-agent", "run", "build"], source.worktree, home);
 		await verifyPinnedFallbackSource(context.paths, context.fallbackSha256);
-		await fs.chmod(compiled, EXECUTABLE_MODE);
+		const binary = path.join(source.worktree, "packages/coding-agent/dist/gjc");
+		await fs.chmod(binary, EXECUTABLE_MODE);
+		const binarySha256 = await hashFile(binary);
 		if (
 			!(await verifyCandidateBinary({
-				binary: compiled,
-				expectedVersion: "0.9.6",
-				expectedSha256: await hashFile(compiled),
-				home: context.paths.cacheRoot,
+				binary,
+				expectedVersion: source.version,
+				expectedSha256: binarySha256,
+				home,
 				trusted: true,
 			}))
-		) {
+		)
 			throw new ReleaseError("GJC_MCP_E_VERIFY");
-		}
-		return await publish(context.paths, compiled, {
+		return await publish(context.paths, binary, {
 			schema: 1,
 			kind: "bun-fallback",
-			version: "0.9.6",
-			upstreamTag: "v0.9.6",
-			tagObject: null,
-			upstreamCommit: "aedd0df99e7c9dff420b50f7ff47bd6645627bdd",
+			version: source.version,
+			upstreamTag: source.upstreamTag,
+			tagObject: source.identity.tagObject,
+			upstreamCommit: source.identity.commit,
 			patchBase: null,
 			patchTip: null,
 			runtimePolicySha256: null,
-			tree: BASELINE_TREE,
+			tree: source.tree,
 			build: {
 				bunVersion: context.bunVersion,
-				lockSha256: "0".repeat(64),
+				lockSha256: await hashFile(path.join(source.worktree, "bun.lock")),
 				commandId: BUILD_COMMAND_ID,
 			},
 			probeContract: 1,
 			createdAt: new Date().toISOString(),
 		});
 	} finally {
-		await fs.rm(compiled, { force: true });
 		await fs.rm(home, { recursive: true, force: true });
 	}
 }
