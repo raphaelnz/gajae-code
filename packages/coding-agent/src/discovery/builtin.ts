@@ -3,6 +3,8 @@
  *
  * Primary provider for GJC native configs. Supports all capabilities.
  */
+
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger, parseFrontmatter, tryParseJson } from "@gajae-code/utils";
 import { YAML } from "bun";
@@ -112,11 +114,31 @@ async function findNearestProjectConfigDir(
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 	const items: MCPServer[] = [];
 	const warnings: string[] = [];
+	const strictSourcePaths = ctx.sourcePaths !== undefined;
 
-	const parseMcpServers = (content: string, path: string, level: "user" | "project"): MCPServer[] => {
+	const parseMcpServers = (content: string, sourcePath: string, level: "user" | "project"): MCPServer[] => {
 		const result: MCPServer[] = [];
-		const data = tryParseJson<{ mcpServers?: Record<string, unknown> }>(content);
+		let data: { mcpServers?: Record<string, unknown> } | null;
+		if (strictSourcePaths) {
+			try {
+				const parsed: unknown = JSON.parse(content);
+				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+					warnings.push("Invalid MCP configuration");
+					return result;
+				}
+				data = parsed as { mcpServers?: Record<string, unknown> };
+			} catch {
+				warnings.push("Invalid MCP configuration");
+				return result;
+			}
+		} else {
+			data = tryParseJson<{ mcpServers?: Record<string, unknown> }>(content);
+		}
 		if (!data?.mcpServers) return result;
+		if (typeof data.mcpServers !== "object" || Array.isArray(data.mcpServers)) {
+			if (strictSourcePaths) warnings.push("Invalid MCP configuration");
+			return result;
+		}
 
 		const expanded = expandEnvVarsDeep(data.mcpServers);
 		for (const [serverName, config] of Object.entries(expanded)) {
@@ -220,7 +242,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					  }
 					| undefined,
 				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
-				_source: createSourceMeta(PROVIDER_ID, path, level),
+				_source: createSourceMeta(PROVIDER_ID, sourcePath, level),
 			});
 		}
 		return result;
@@ -241,11 +263,19 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 
 	const contents = await Promise.allSettled(
 		paths.map(async p => {
-			const content = await readFile(p.path);
-			if (content) {
-				return { path: p.path, content, level: p.level };
+			if (!strictSourcePaths) {
+				const content = await readFile(p.path);
+				return content === null ? null : { path: p.path, content, level: p.level };
 			}
-			return null;
+			try {
+				const content = await fs.readFile(p.path, "utf8");
+				return { path: p.path, content, level: p.level };
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+					warnings.push("Unable to read MCP configuration");
+				}
+				return null;
+			}
 		}),
 	);
 
@@ -253,6 +283,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		if (result.status === "fulfilled" && result.value) {
 			const { path, content, level } = result.value;
 			items.push(...parseMcpServers(content, path, level));
+		} else if (strictSourcePaths && result.status === "rejected") {
+			warnings.push("Unable to read MCP configuration");
 		}
 	}
 

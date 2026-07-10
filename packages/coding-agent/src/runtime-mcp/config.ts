@@ -117,6 +117,9 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		home: options?.home,
 		sourcePaths: options?.sourcePaths,
 	});
+	if (options?.sourcePaths && result.warnings.length > 0) {
+		throw new Error("MCP configuration is invalid");
+	}
 
 	// Apply scope and exact-source restrictions before any config is eligible.
 	const allowedSourcePaths = options?.sourcePaths

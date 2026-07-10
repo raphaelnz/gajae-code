@@ -193,4 +193,85 @@ describe("standalone user-global MCP synthetic auth and transport coverage", () 
 			await httpServer.stop(true);
 		}
 	});
+	it("fails closed on malformed exact-source JSON without surfacing its contents", async () => {
+		const cwd = path.join(root, "project");
+		const userConfigPath = path.join(getAgentDir(), "mcp.json");
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.writeFile(userConfigPath, '{"Authorization":"malformed-secret-canary"');
+
+		const loaded = await discoverAndLoadMCPTools(cwd, {
+			enableProjectConfig: false,
+			autoloadOnly: true,
+			providers: ["native"],
+			home: root,
+			sourcePaths: [userConfigPath],
+			filterExa: false,
+			cacheStorage: null,
+		});
+		try {
+			expect(loaded.tools).toEqual([]);
+			expect(loaded.connectedServers).toEqual([]);
+			expect(loaded.errors).toEqual([{ path: ".mcp.json", error: "MCP configuration is invalid" }]);
+			expect(JSON.stringify(loaded.errors)).not.toContain("malformed-secret-canary");
+		} finally {
+			await loaded.manager.disconnectAll();
+		}
+	});
+
+	it("fails closed when the exact source cannot be read", async () => {
+		const cwd = path.join(root, "project");
+		const userConfigPath = path.join(getAgentDir(), "mcp.json");
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.mkdir(userConfigPath);
+
+		const loaded = await discoverAndLoadMCPTools(cwd, {
+			enableProjectConfig: false,
+			autoloadOnly: true,
+			providers: ["native"],
+			home: root,
+			sourcePaths: [userConfigPath],
+			filterExa: false,
+			cacheStorage: null,
+		});
+		try {
+			expect(loaded.tools).toEqual([]);
+			expect(loaded.connectedServers).toEqual([]);
+			expect(loaded.errors).toEqual([{ path: ".mcp.json", error: "MCP configuration is invalid" }]);
+		} finally {
+			await loaded.manager.disconnectAll();
+		}
+	});
+
+	it("rejects a mixed valid and invalid exact-source catalog before connecting either entry", async () => {
+		const cwd = path.join(root, "project");
+		const userConfigPath = path.join(getAgentDir(), "mcp.json");
+		const fixture = path.join(import.meta.dir, "fixtures/gjc-plugins/valid-mcp-bundle/mcp/server.ts");
+		await fs.mkdir(cwd, { recursive: true });
+		await fs.writeFile(
+			userConfigPath,
+			JSON.stringify({
+				mcpServers: {
+					healthy: { type: "stdio", command: process.execPath, args: [fixture] },
+					invalid: { type: "stdio" },
+				},
+			}),
+		);
+
+		const loaded = await discoverAndLoadMCPTools(cwd, {
+			enableProjectConfig: false,
+			autoloadOnly: true,
+			providers: ["native"],
+			home: root,
+			sourcePaths: [userConfigPath],
+			filterExa: false,
+			cacheStorage: null,
+		});
+		try {
+			expect(loaded.tools).toEqual([]);
+			expect(loaded.connectedServers).toEqual([]);
+			expect(loaded.errors).toEqual([{ path: ".mcp.json", error: "MCP configuration is invalid" }]);
+		} finally {
+			await loaded.manager.disconnectAll();
+		}
+	});
 });
