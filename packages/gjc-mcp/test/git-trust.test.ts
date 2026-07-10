@@ -174,6 +174,15 @@ describe("official stable-tag selection", () => {
 		}
 	});
 
+	test("ignores unreachable historical tags below the managed version floor", async () => {
+		officialRemote([
+			{ name: "v0.1.0", commit: H40_A, reachable: false },
+			{ name: "v0.9.6", commit: H40_B },
+		]);
+		const result = await resolveOfficialRelease(await repository(), "0.9.6", {}, environment);
+		expect(result.candidates.map(candidate => candidate.name)).toEqual(["v0.1.0", "v0.9.6"]);
+		expect(result.selected).toBeNull();
+	});
 	test("rejects downgrade-only advertisements and tags unreachable from the advertised default branch", async () => {
 		officialRemote([{ name: "v0.9.5", commit: H40_A }]);
 		await expectTrustCode(

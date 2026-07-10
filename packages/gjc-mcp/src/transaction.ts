@@ -284,7 +284,7 @@ async function defaultPrepareBootstrap(
 	const engine = await defaultEngine(paths);
 	const resolved = await resolveOfficialRelease(
 		paths.sourceRoot,
-		"0.0.0",
+		"0.9.6",
 		{ [BASELINE_TAG.name]: BASELINE_TAG.identity },
 		engine.environment,
 	);

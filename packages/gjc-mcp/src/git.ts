@@ -179,10 +179,13 @@ export async function resolveOfficialRelease(
 		const name = ref.slice(`${namespace}/tags/`.length);
 		if (!STABLE_TAG.test(name)) continue;
 		const identity = await resolveTag(repository, ref, environment);
-		try {
-			await runGit(repository, ["merge-base", "--is-ancestor", identity.commit, defaultCommit], environment);
-		} catch {
-			throw new GitTrustError("GJC_MCP_E_TAG_UNREACHABLE");
+		const version = name.slice(1);
+		if (compareVersions(version, currentVersion) >= 0 || observed[name] !== undefined) {
+			try {
+				await runGit(repository, ["merge-base", "--is-ancestor", identity.commit, defaultCommit], environment);
+			} catch {
+				throw new GitTrustError("GJC_MCP_E_TAG_UNREACHABLE");
+			}
 		}
 		candidates.push({ name, version: name.slice(1), identity });
 	}
